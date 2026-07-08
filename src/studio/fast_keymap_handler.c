@@ -34,7 +34,8 @@ static struct zmk_rpc_custom_subsystem_meta fast_keymap_subsystem_meta = {
     .security = ZMK_STUDIO_RPC_HANDLER_UNSECURED,
 };
 
-ZMK_RPC_CUSTOM_SUBSYSTEM(cormoran__fast_keymap, &fast_keymap_subsystem_meta, fast_keymap_rpc_handle_request);
+ZMK_RPC_CUSTOM_SUBSYSTEM(cormoran__fast_keymap, &fast_keymap_subsystem_meta,
+                         fast_keymap_rpc_handle_request);
 
 ZMK_RPC_CUSTOM_SUBSYSTEM_RESPONSE_BUFFER(cormoran__fast_keymap, cormoran_fast_keymap_Response);
 
@@ -149,8 +150,7 @@ static int handle_get_snapshot(cormoran_fast_keymap_Response *resp) {
 
 /* -- list_behaviors ---------------------------------------------------- */
 
-static bool encode_behavior_alias(pb_ostream_t *stream, const pb_field_t *field,
-                                  void *const *arg) {
+static bool encode_behavior_alias(pb_ostream_t *stream, const pb_field_t *field, void *const *arg) {
     const struct device *dev = (const struct device *)*arg;
     const char *alias = fk_behavior_alias(dev);
 
@@ -213,7 +213,8 @@ static bool encode_behavior_summaries(pb_ostream_t *stream, const pb_field_t *fi
 
 static int handle_list_behaviors(cormoran_fast_keymap_Response *resp) {
     cormoran_fast_keymap_ListBehaviorsResponse *out = &resp->response_type.list_behaviors;
-    *out = (cormoran_fast_keymap_ListBehaviorsResponse)cormoran_fast_keymap_ListBehaviorsResponse_init_zero;
+    *out = (cormoran_fast_keymap_ListBehaviorsResponse)
+        cormoran_fast_keymap_ListBehaviorsResponse_init_zero;
     out->behaviors.funcs.encode = encode_behavior_summaries;
 
     resp->which_response_type = cormoran_fast_keymap_Response_list_behaviors_tag;
@@ -270,11 +271,13 @@ static bool encode_value_description(pb_ostream_t *stream, const pb_field_t *fie
 
         switch (val->type) {
         case BEHAVIOR_PARAMETER_VALUE_TYPE_VALUE:
-            desc.which_value_type = cormoran_fast_keymap_BehaviorParameterValueDescription_constant_tag;
+            desc.which_value_type =
+                cormoran_fast_keymap_BehaviorParameterValueDescription_constant_tag;
             desc.value_type.constant = val->value;
             break;
         case BEHAVIOR_PARAMETER_VALUE_TYPE_RANGE:
-            desc.which_value_type = cormoran_fast_keymap_BehaviorParameterValueDescription_range_tag;
+            desc.which_value_type =
+                cormoran_fast_keymap_BehaviorParameterValueDescription_range_tag;
             desc.value_type.range.min = val->range.min;
             desc.value_type.range.max = val->range.max;
             break;
@@ -282,20 +285,22 @@ static bool encode_value_description(pb_ostream_t *stream, const pb_field_t *fie
             desc.which_value_type = cormoran_fast_keymap_BehaviorParameterValueDescription_nil_tag;
             break;
         case BEHAVIOR_PARAMETER_VALUE_TYPE_HID_USAGE:
-            desc.which_value_type = cormoran_fast_keymap_BehaviorParameterValueDescription_hid_usage_tag;
+            desc.which_value_type =
+                cormoran_fast_keymap_BehaviorParameterValueDescription_hid_usage_tag;
             desc.value_type.hid_usage.consumer_max = ZMK_HID_CONSUMER_MAX_USAGE;
             desc.value_type.hid_usage.keyboard_max = ZMK_HID_KEYBOARD_MAX_USAGE;
             break;
         case BEHAVIOR_PARAMETER_VALUE_TYPE_LAYER_ID:
-            desc.which_value_type = cormoran_fast_keymap_BehaviorParameterValueDescription_layer_id_tag;
+            desc.which_value_type =
+                cormoran_fast_keymap_BehaviorParameterValueDescription_layer_id_tag;
             break;
         default:
             LOG_ERR("Unknown value description type %d", val->type);
             return false;
         }
 
-        if (!pb_encode_submessage(stream, &cormoran_fast_keymap_BehaviorParameterValueDescription_msg,
-                                  &desc)) {
+        if (!pb_encode_submessage(
+                stream, &cormoran_fast_keymap_BehaviorParameterValueDescription_msg, &desc)) {
             return false;
         }
     }
@@ -348,7 +353,8 @@ static int handle_get_behavior_details(uint32_t behavior_id, cormoran_fast_keyma
     fk_metadata_state.sets = desc.sets;
     fk_metadata_state.sets_len = desc.sets_len;
 
-    cormoran_fast_keymap_GetBehaviorDetailsResponse *out = &resp->response_type.get_behavior_details;
+    cormoran_fast_keymap_GetBehaviorDetailsResponse *out =
+        &resp->response_type.get_behavior_details;
     *out = (cormoran_fast_keymap_GetBehaviorDetailsResponse)
         cormoran_fast_keymap_GetBehaviorDetailsResponse_init_zero;
     out->id = behavior_id;
@@ -402,8 +408,7 @@ static void encode_binding_fields(cormoran_fast_keymap_BehaviorBinding *bb,
     }
 }
 
-static bool encode_layer_bindings(pb_ostream_t *stream, const pb_field_t *field,
-                                  void *const *arg) {
+static bool encode_layer_bindings(pb_ostream_t *stream, const pb_field_t *field, void *const *arg) {
     const struct fk_layer_encode_arg *a = (const struct fk_layer_encode_arg *)*arg;
     uint16_t binding_count = fk_binding_count();
 
@@ -411,7 +416,7 @@ static bool encode_layer_bindings(pb_ostream_t *stream, const pb_field_t *field,
         const struct zmk_behavior_binding *binding;
 #if IS_ENABLED(CONFIG_ZMK_KEYMAP_SETTINGS_STORAGE)
         binding = a->use_default ? zmk_stock_keymap_get_layer_binding_at_idx(a->layer_id, b)
-                                  : zmk_keymap_get_layer_binding_at_idx(a->layer_id, b);
+                                 : zmk_keymap_get_layer_binding_at_idx(a->layer_id, b);
 #else
         binding = zmk_keymap_get_layer_binding_at_idx(a->layer_id, b);
 #endif

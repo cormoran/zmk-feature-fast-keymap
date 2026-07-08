@@ -86,5 +86,6 @@ uint8_t fk_layer_count(void);
  * meaning: free slots, not configured-layer count). */
 uint32_t fk_available_layers(void);
 
-/** Number of registered behaviors (STRUCT_SECTION_FOREACH(zmk_behavior_local_id_map, ...) count). */
+/** Number of registered behaviors (STRUCT_SECTION_FOREACH(zmk_behavior_local_id_map, ...) count).
+ */
 uint32_t fk_behavior_count(void);

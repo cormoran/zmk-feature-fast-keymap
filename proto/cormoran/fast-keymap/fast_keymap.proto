@@ -16,9 +16,9 @@ message Request {
         bool get_snapshot = 1;
         bool list_behaviors = 2;
         GetBehaviorDetailsRequest get_behavior_details = 3;
-        GetLayerRequest get_layer = 4;          // current/effective
-        GetLayerRequest get_default_layer = 5;  // DT stock default
-        GetLayerRequest get_edited_layer = 6;   // diff current vs default
+        GetLayerRequest get_layer = 4;         // current/effective
+        GetLayerRequest get_default_layer = 5; // DT stock default
+        GetLayerRequest get_edited_layer = 6;  // diff current vs default
         bool get_physical_layouts = 7;
     }
 }

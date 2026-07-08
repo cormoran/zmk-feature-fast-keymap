@@ -174,8 +174,8 @@ static bool decode_str_cb(pb_istream_t *stream, const pb_field_t *field, void **
 
 #define CAPTURE_ARRAY(type, cap)                                                                   \
     struct {                                                                                       \
-        type entries[cap];                                                                          \
-        size_t count;                                                                               \
+        type entries[cap];                                                                         \
+        size_t count;                                                                              \
     }
 
 struct layer_fp_entry {
@@ -269,8 +269,7 @@ struct behavior_summary_entry {
 };
 typedef CAPTURE_ARRAY(struct behavior_summary_entry, 64) behavior_summary_capture_t;
 
-static bool decode_behavior_summary_cb(pb_istream_t *stream, const pb_field_t *field,
-                                       void **arg) {
+static bool decode_behavior_summary_cb(pb_istream_t *stream, const pb_field_t *field, void **arg) {
     ARG_UNUSED(field);
     behavior_summary_capture_t *captured = *arg;
     if (captured->count >= ARRAY_SIZE(captured->entries)) {
@@ -297,8 +296,8 @@ static bool decode_behavior_summary_cb(pb_istream_t *stream, const pb_field_t *f
     return true;
 }
 
-static const struct behavior_summary_entry *find_behavior_by_alias(
-    const behavior_summary_capture_t *cap, const char *alias) {
+static const struct behavior_summary_entry *
+find_behavior_by_alias(const behavior_summary_capture_t *cap, const char *alias) {
     for (size_t i = 0; i < cap->count; i++) {
         if (strcmp(cap->entries[i].alias, alias) == 0) {
             return &cap->entries[i];
@@ -371,7 +370,8 @@ static int test_get_layer_matches_live_keymap(void) {
          * only zeros the union up to its smallest listed member, not up to
          * whichever arm we're about to use, so untouched fields here (e.g.
          * `name`) would otherwise be uninitialized stack garbage. */
-        resp.response_type.get_layer = (cormoran_fast_keymap_Layer)cormoran_fast_keymap_Layer_init_zero;
+        resp.response_type.get_layer =
+            (cormoran_fast_keymap_Layer)cormoran_fast_keymap_Layer_init_zero;
         resp.response_type.get_layer.bindings.funcs.decode = decode_binding_cb;
         resp.response_type.get_layer.bindings.arg = &captured;
 
@@ -401,12 +401,11 @@ static int test_get_layer_matches_live_keymap(void) {
             }
 
             const cormoran_fast_keymap_BehaviorBinding *got = &captured.entries[b];
-            if (got->behavior_id != want_id || got->param1 != want_p1 ||
-                got->param2 != want_p2) {
+            if (got->behavior_id != want_id || got->param1 != want_p1 || got->param2 != want_p2) {
                 LOG_ERR("get_layer(%d) binding %d mismatch: got id=%d p1=%u p2=%u, want id=%d "
                         "p1=%u p2=%u",
-                        layer_id, b, got->behavior_id, got->param1, got->param2, want_id,
-                        want_p1, want_p2);
+                        layer_id, b, got->behavior_id, got->param1, got->param2, want_id, want_p1,
+                        want_p2);
                 return -EINVAL;
             }
         }
@@ -424,8 +423,8 @@ static int test_alias_resolution(void) {
     cormoran_fast_keymap_Response resp = cormoran_fast_keymap_Response_init_zero;
     behavior_summary_capture_t captured = {0};
     resp.which_response_type = cormoran_fast_keymap_Response_list_behaviors_tag;
-    resp.response_type.list_behaviors =
-        (cormoran_fast_keymap_ListBehaviorsResponse)cormoran_fast_keymap_ListBehaviorsResponse_init_zero;
+    resp.response_type.list_behaviors = (cormoran_fast_keymap_ListBehaviorsResponse)
+        cormoran_fast_keymap_ListBehaviorsResponse_init_zero;
     resp.response_type.list_behaviors.behaviors.funcs.decode = decode_behavior_summary_cb;
     resp.response_type.list_behaviors.behaviors.arg = &captured;
 
@@ -439,7 +438,8 @@ static int test_alias_resolution(void) {
 
     static const char *const expect_standard[] = {"kp", "mo", "trans"};
     for (size_t i = 0; i < ARRAY_SIZE(expect_standard); i++) {
-        const struct behavior_summary_entry *e = find_behavior_by_alias(&captured, expect_standard[i]);
+        const struct behavior_summary_entry *e =
+            find_behavior_by_alias(&captured, expect_standard[i]);
         if (!e) {
             LOG_ERR("list_behaviors did not resolve alias '%s' (count=%u)", expect_standard[i],
                     (unsigned int)captured.count);
@@ -463,7 +463,8 @@ static int test_edited_diff_and_default(void) {
     cormoran_fast_keymap_Response before = cormoran_fast_keymap_Response_init_zero;
     layer_fp_capture_t before_layers = {0};
     before.which_response_type = cormoran_fast_keymap_Response_snapshot_tag;
-    before.response_type.snapshot = (cormoran_fast_keymap_Snapshot)cormoran_fast_keymap_Snapshot_init_zero;
+    before.response_type.snapshot =
+        (cormoran_fast_keymap_Snapshot)cormoran_fast_keymap_Snapshot_init_zero;
     before.response_type.snapshot.layers.funcs.decode = decode_layer_fp_cb;
     before.response_type.snapshot.layers.arg = &before_layers;
     if (!call_fast_keymap_rpc(&snap_req, &before)) {
@@ -496,7 +497,8 @@ static int test_edited_diff_and_default(void) {
     cormoran_fast_keymap_Response after = cormoran_fast_keymap_Response_init_zero;
     layer_fp_capture_t after_layers = {0};
     after.which_response_type = cormoran_fast_keymap_Response_snapshot_tag;
-    after.response_type.snapshot = (cormoran_fast_keymap_Snapshot)cormoran_fast_keymap_Snapshot_init_zero;
+    after.response_type.snapshot =
+        (cormoran_fast_keymap_Snapshot)cormoran_fast_keymap_Snapshot_init_zero;
     after.response_type.snapshot.layers.funcs.decode = decode_layer_fp_cb;
     after.response_type.snapshot.layers.arg = &after_layers;
     if (!call_fast_keymap_rpc(&snap_req, &after)) {
@@ -596,7 +598,8 @@ static int test_edited_diff_and_default(void) {
     cormoran_fast_keymap_Response current_resp = cormoran_fast_keymap_Response_init_zero;
     binding_capture_t current_captured = {0};
     current_resp.which_response_type = cormoran_fast_keymap_Response_get_layer_tag;
-    current_resp.response_type.get_layer = (cormoran_fast_keymap_Layer)cormoran_fast_keymap_Layer_init_zero;
+    current_resp.response_type.get_layer =
+        (cormoran_fast_keymap_Layer)cormoran_fast_keymap_Layer_init_zero;
     current_resp.response_type.get_layer.bindings.funcs.decode = decode_binding_cb;
     current_resp.response_type.get_layer.bindings.arg = &current_captured;
     if (!call_fast_keymap_rpc(&current_req, &current_resp)) {
