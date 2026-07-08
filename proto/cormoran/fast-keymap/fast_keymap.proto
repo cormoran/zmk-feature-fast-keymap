@@ -2,19 +2,171 @@ syntax = "proto3";
 
 package cormoran.fast_keymap;
 
-message SampleRequest { int32 value = 1; }
-
-message SampleResponse { string value = 1; }
+// A read-only, fast-loading alternative to ZMK's official `zmk.keymap` /
+// `zmk.behaviors` Studio subsystems. See DESIGN.md for the full rationale.
+//
+// Message shapes deliberately mimic the official proto
+// (dependencies/modules/msgs/zmk-studio-messages/proto/zmk/{keymap,behaviors}.proto)
+// -- no bespoke byte packing, no app-level response chunking. `repeated` and
+// `string` fields are left WITHOUT `max_size`/`max_count` on purpose so
+// nanopb generates callback (streaming) field types; see DESIGN.md SS3.
 
 message Request {
-    oneof request_type { SampleRequest sample = 1; }
+    oneof request_type {
+        bool get_snapshot = 1;
+        bool list_behaviors = 2;
+        GetBehaviorDetailsRequest get_behavior_details = 3;
+        GetLayerRequest get_layer = 4;          // current/effective
+        GetLayerRequest get_default_layer = 5;  // DT stock default
+        GetLayerRequest get_edited_layer = 6;   // diff current vs default
+        bool get_physical_layouts = 7;
+    }
 }
-
-message ErrorResponse { string message = 1; }
 
 message Response {
     oneof response_type {
         ErrorResponse error = 1;
-        SampleResponse sample = 2;
+        Snapshot snapshot = 2;
+        ListBehaviorsResponse list_behaviors = 3;
+        GetBehaviorDetailsResponse get_behavior_details = 4;
+        Layer get_layer = 5;
+        Layer get_default_layer = 6;
+        EditedLayer get_edited_layer = 7;
+        PhysicalLayouts get_physical_layouts = 8;
     }
+}
+
+message GetBehaviorDetailsRequest { uint32 behavior_id = 1; }
+
+message GetLayerRequest { uint32 layer_id = 1; }
+
+enum ErrorCode {
+    ERR_GENERIC = 0;
+    ERR_INVALID_LAYER = 1;
+    ERR_INVALID_BEHAVIOR = 2;
+}
+
+message ErrorResponse { ErrorCode code = 1; }
+
+// Cheap cache keys for every data group this subsystem serves, so a client
+// with a warm cache can skip re-fetching groups whose fingerprint matches.
+// See DESIGN.md SS4 for the exact canonicalization each fingerprint hashes.
+message Snapshot {
+    uint32 definition_version = 1;
+    uint32 behaviors_fp = 2;
+    uint32 default_keymap_fp = 3;
+    uint32 keymap_fp = 4;
+    uint32 physical_layout_fp = 5;
+    uint32 behavior_count = 6;
+    uint32 max_layer_name_length = 7;
+    uint32 available_layers = 8;
+    uint32 active_layout_index = 9;
+    repeated LayerFingerprint layers = 10;
+}
+
+message LayerFingerprint {
+    uint32 id = 1;
+    string name = 2;
+    uint32 binding_count = 3;
+    uint32 fp = 4;
+    uint32 default_fp = 5;
+    uint32 edited_count = 6;
+}
+
+message ListBehaviorsResponse { repeated BehaviorSummary behaviors = 1; }
+
+message BehaviorSummary {
+    uint32 local_id = 1;
+    string alias = 2;
+    string display_name = 3;
+    uint32 metadata_fp = 4;
+    bool standard = 5;
+}
+
+// Official shape (zmk.behaviors.GetBehaviorDetailsResponse) plus our
+// `alias`/`metadata_fp` extensions.
+message GetBehaviorDetailsResponse {
+    uint32 id = 1;
+    string display_name = 2;
+    string alias = 3;
+    uint32 metadata_fp = 4;
+    repeated BehaviorBindingParametersSet metadata = 5;
+}
+
+// -- The following metadata messages are copied verbatim (names, field
+// numbers, shape) from zmk.behaviors so firmware and the bundled web
+// standard-behavior definitions can share the exact same encoding. --
+
+message BehaviorBindingParametersSet {
+    repeated BehaviorParameterValueDescription param1 = 1;
+    repeated BehaviorParameterValueDescription param2 = 2;
+}
+
+message BehaviorParameterValueDescriptionRange {
+    int32 min = 1;
+    int32 max = 2;
+}
+
+message BehaviorParameterNil {}
+message BehaviorParameterLayerId {}
+message BehaviorParameterHidUsage {
+    uint32 keyboard_max = 1;
+    uint32 consumer_max = 2;
+}
+
+message BehaviorParameterValueDescription {
+    string name = 1;
+
+    oneof value_type {
+        BehaviorParameterNil nil = 2;
+        uint32 constant = 3;
+        BehaviorParameterValueDescriptionRange range = 4;
+        BehaviorParameterHidUsage hid_usage = 5;
+        BehaviorParameterLayerId layer_id = 6;
+    }
+}
+
+// -- Keymap/layer/binding messages: same shape as zmk.keymap's, plus the
+// default/edited-layer extensions. --
+
+message BehaviorBinding {
+    sint32 behavior_id = 1;
+    uint32 param1 = 2;
+    uint32 param2 = 3;
+}
+
+message Layer {
+    uint32 id = 1;
+    string name = 2;
+    repeated BehaviorBinding bindings = 3;
+}
+
+message EditedBinding {
+    uint32 position = 1;
+    BehaviorBinding binding = 2;
+}
+
+message EditedLayer {
+    uint32 id = 1;
+    repeated EditedBinding bindings = 2;
+}
+
+message PhysicalLayouts {
+    uint32 active_layout_index = 1;
+    repeated PhysicalLayout layouts = 2;
+}
+
+message PhysicalLayout {
+    string name = 1;
+    repeated KeyPhysicalAttrs keys = 2;
+}
+
+message KeyPhysicalAttrs {
+    sint32 width = 1;
+    sint32 height = 2;
+    sint32 x = 3;
+    sint32 y = 4;
+    sint32 r = 5;
+    sint32 rx = 6;
+    sint32 ry = 7;
 }

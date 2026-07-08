@@ -1,5 +1,9 @@
 # Nanopb options file for fast_keymap.proto
-# This defines max sizes for string fields
-
-cormoran.fast_keymap.SampleResponse.value    max_size:64
-cormoran.fast_keymap.ErrorResponse.message   max_size:64
+#
+# Deliberately empty of max_size/max_count entries: every `string` and
+# `repeated` field in fast_keymap.proto must stay a nanopb CALLBACK field
+# (pb_callback_t) so the response streams straight into the Studio RPC
+# transport ring buffer instead of being buffered whole in a plain struct.
+# See DESIGN.md SS3 and skills/zmk-module-dev/SKILL.md. Do not add max_size
+# / max_count options here -- that would turn a field back into a bounded
+# plain-struct (STATIC) field, defeating streaming.

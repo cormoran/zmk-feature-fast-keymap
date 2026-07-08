@@ -1,1 +1,22 @@
 #include "../test.dtsi"
+
+/ {
+	keymap {
+		default_layer {
+			bindings = <
+			&kp A
+			&kp B
+			&mo 1
+			&trans
+			>;
+		};
+		layer_1 {
+			bindings = <
+			&kp C
+			&kp D
+			&trans
+			&trans
+			>;
+		};
+	};
+};

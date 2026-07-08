@@ -46,8 +46,12 @@ successful smaller round trips:
     Renode, a ~28-byte framed custom response round-trips OK twice, then
     the third request times out; a first-call response of ~55-65 bytes
     framed times out immediately.
-  - This template's SampleResponse (~51 bytes framed) and its own
-    ErrorResponse both time out on the very first call.
+  - The template's original SampleResponse (~51 bytes framed) and its own
+    ErrorResponse both timed out on the very first call. This module's real
+    get_snapshot response (a callback-encoded Snapshot -- see DESIGN.md SS3;
+    necessarily larger, since it streams per-layer fingerprints) reproduces
+    the identical timeout (confirmed 2026-07-08, see
+    test_custom_rpc_get_snapshot_round_trip_KNOWN_BROKEN_UNDER_RENODE below).
   - Small, callback-free responses stay reliable indefinitely: core
     GetDeviceInfo (~21B; the action's smoke test), and meta.simple_error
     (~10B; see test_custom_rpc_invalid_index_dispatch below -- a genuine,
@@ -238,20 +242,28 @@ class RenodeTemplateModuleTests(unittest.TestCase):
 
     # -- Known Renode limitation: documented, asserted, not silently skipped --
 
-    def test_custom_rpc_sample_round_trip_KNOWN_BROKEN_UNDER_RENODE(self):
+    def test_custom_rpc_get_snapshot_round_trip_KNOWN_BROKEN_UNDER_RENODE(self):
         """Documents the known Renode-environment limitation (see this
-        file's module docstring): sending a real SampleRequest to this
-        module's own registered subsystem (index 0) should get back a
-        SampleResponse with `"Hello from firmware! Received: 42"` (see
-        handle_sample_request() in src/studio/fast_keymap_handler.c) -- and
-        does, on real hardware -- but under Renode the ~51-byte response
-        never arrives (RPC TX path stalls; smaller callback-free responses
-        are unaffected). This test asserts *that exact failure* (a read
-        timeout) so it will start failing -- loudly, as a signal to update
-        this test to assert the real round trip -- the day the underlying
+        file's module docstring): sending a real get_snapshot request to
+        this module's own registered subsystem (index 0) should get back a
+        Snapshot with nonzero fingerprints and at least one layer (see
+        handle_get_snapshot() in src/studio/fast_keymap_handler.c) -- and
+        does, on real hardware -- but under Renode this module's own
+        callback-encoded response (like the template's SampleResponse
+        before it) never arrives (RPC TX path stalls; smaller callback-free
+        responses are unaffected). Empirically confirmed for this exact
+        message on 2026-07-08: replacing this test's body with the
+        optimistic real-round-trip assertion (ParseFromString on
+        `resp.request_response.custom.call.payload`, checking
+        `WhichOneof("response_type") == "snapshot"`, `definition_version`,
+        `behaviors_fp`, `keymap_fp`, `behavior_count`, `len(snapshot.layers)`)
+        reproduces the same read timeout as the original SampleResponse
+        case. This test asserts *that exact failure* (a read timeout) so it
+        will start failing -- loudly, as a signal to update this test to
+        assert the real round trip -- the day the underlying
         emulation/harness limitation is fixed."""
         inner_req = self.fast_keymap_pb2.Request()
-        inner_req.sample.value = 42
+        inner_req.get_snapshot = True
         self._send_call(KNOWN_SUBSYSTEM_INDEX, inner_req.SerializeToString())
 
         resp_bytes = self.rpc.read_frame(timeout=10.0)
@@ -259,10 +271,10 @@ class RenodeTemplateModuleTests(unittest.TestCase):
             resp_bytes,
             "custom.call to the real registered subsystem got a response under Renode -- "
             "the known Renode-only limitation documented in this file's module docstring "
-            "appears to be fixed! Update this test to assert the real SampleResponse "
-            "round-trip instead (see test_custom_rpc_invalid_index_dispatch for the "
-            "request-building pattern), and consider re-adding subsystem discovery via "
-            "ListCustomSubsystemRequest.",
+            "appears to be fixed! Update this test to assert the real Snapshot round-trip "
+            "instead (see this test's own docstring for the exact assertions to restore, "
+            "and test_custom_rpc_invalid_index_dispatch for the request-building pattern), "
+            "and consider re-adding subsystem discovery via ListCustomSubsystemRequest.",
         )
 
 

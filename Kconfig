@@ -6,5 +6,22 @@ if ZMK_FAST_KEYMAP
 config ZMK_FAST_KEYMAP_STUDIO_RPC
     bool "Enable fast-keymap feature custom Studio RPC"
     depends on ZMK_STUDIO
+    default y
+    select CRC
+    help
+      Fingerprints (DESIGN.md SS4) are computed with crc32_ieee_update()
+      (zephyr/sys/crc.h), which lives behind CONFIG_CRC.
+
+if ZMK_FAST_KEYMAP_STUDIO_RPC
+
+config ZMK_FAST_KEYMAP_STUDIO_RPC_TEST
+    bool "Enable fast-keymap Studio RPC self-test (native_sim only)"
+    help
+      Adds test-only init logic that drives the registered RPC handler
+      directly (no transport), exercising snapshot fingerprints, behavior
+      listing/alias resolution, get_layer, and the default/edited-layer
+      diff. Not for production builds.
+
+endif # ZMK_FAST_KEYMAP_STUDIO_RPC
 
 endif
