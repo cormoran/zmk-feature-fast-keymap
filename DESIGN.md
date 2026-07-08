@@ -51,17 +51,26 @@ Extensions requested: expose each behavior's **keymap alias** (`kp` for
   (`zmk/keymap.h`) returns the **current/effective** binding; `binding_idx` is
   a physical-layout index mapped to storage via the selected position map.
 - `zmk_physical_layouts_get_selected_to_stock_position_map(&map)`
-  (`zmk/physical_layouts.h`, **public**) returns that map and its length;
-  `map[binding_idx]` = storage position. Use it for BOTH current and default
-  so the diff lines up.
-- The compiled-in default keymap array in ZMK (`zmk_stock_keymap`) is
-  `static` — **not exported**. Reconstruct our own copy in-module from
-  devicetree using the **public** macros `ZMK_KEYMAP_LAYERS_FOREACH`,
-  `ZMK_KEYMAP_EXTRACT_BINDING` (both in `zmk/keymap.h`) and `ZMK_KEYMAP_LEN`
-  (`zmk/matrix.h`). Store as
-  `static const struct zmk_behavior_binding fk_stock_keymap[ZMK_KEYMAP_LAYERS_LEN][ZMK_KEYMAP_LEN]`,
-  indexed by `[layer_id][storage_pos]`, exactly like ZMK does. Each entry
-  holds `.behavior_dev` (const char*), `.param1`, `.param2`.
+  (`zmk/physical_layouts.h`, **public**) returns that map and its length. You
+  do NOT need to call it directly — both the current and default accessors
+  below already apply it internally, so passing the same `binding_idx` to both
+  yields aligned bindings for the diff.
+- **Default ("stock") keymap accessor.** Use the public
+  `zmk_stock_keymap_get_layer_binding_at_idx(layer_id, binding_idx)`
+  (`zmk/keymap.h`) — added in the ZMK branch
+  `pr/main+custom-studio-protocol/expose-stock-keymap` (the west manifest
+  already pins it). It mirrors `zmk_keymap_get_layer_binding_at_idx` but
+  returns the compiled-in DT default binding (same position mapping applied),
+  so the edited-diff is simply: for each `binding_idx`, compare
+  `zmk_keymap_get_layer_binding_at_idx(...)` (current) vs
+  `zmk_stock_keymap_get_layer_binding_at_idx(...)` (default). **Do NOT
+  reconstruct the stock keymap in-module** — there is no `default_keymap.c`.
+  The accessor is guarded by `#if IS_ENABLED(CONFIG_ZMK_KEYMAP_SETTINGS_STORAGE)`
+  (declared only then). When that config is off, the keymap is `const` and
+  cannot be edited, so treat default == current: `get_default_layer_bindings`
+  returns the same bytes as `get_layer_bindings`, `default_keymap_fp ==
+  keymap_fp`, and `edited_count`/`get_edited_bindings` are always empty. Guard
+  the default/edited code paths with the same `#if` and provide that fallback.
 - Behavior identity:
   - `zmk_behavior_local_id_t` is **`uint16`** (packs in 2 bytes).
   - Iterate behaviors at runtime via
@@ -145,8 +154,12 @@ Fixed-width little-endian, no protobuf per-binding overhead:
   zeros for a missing binding; pick one sentinel and document it. Recommended:
   use the real local id (`zmk_behavior_get_local_id(binding->behavior_dev)`)
   and `0xFFFF` only when `behavior_dev == NULL`.
-- **Edited entry** = 12 bytes: `u16 storage_position` + packed binding. Used
-  only by `get_edited_bindings`.
+- **Edited entry** = 12 bytes: `u16 binding_idx` + packed binding. Used only by
+  `get_edited_bindings`; `binding_idx` is the same index space as
+  `zmk_keymap_get_layer_binding_at_idx` (so the client applies each edit
+  directly onto its cached default layer). A position is "edited" when the
+  current packed binding differs from the default packed binding at that
+  `binding_idx`.
 
 Chunk `bytes` fields carry an integer number of entries; `max_size` = **240**
 (24 bindings or 20 edited entries per chunk). Client reassembles by `offset`.
@@ -247,6 +260,12 @@ client loops until `!has_more`. Invalid `layer_id`/`local_id`/`offset` →
 
 ## 8. Config / buffers
 
+- **ZMK branch requirement.** This module calls
+  `zmk_stock_keymap_get_layer_binding_at_idx()`, which currently exists only on
+  the ZMK branch `pr/main+custom-studio-protocol/expose-stock-keymap` (the test
+  west manifest pins it). The consumer setup docs (README, Phase D) must tell
+  users to point their `config/west.yml` ZMK project at that branch until it
+  merges into `main+custom-studio-protocol`.
 - Kconfig: `ZMK_FAST_KEYMAP` (bool, main switch) and
   `ZMK_FAST_KEYMAP_STUDIO_RPC` (default y, `depends on ZMK_STUDIO`). The
   handler compiles only under the latter. Depends only on ZMK core keymap +
@@ -264,8 +283,8 @@ client loops until `!has_more`. Invalid `layer_id`/`local_id`/`offset` →
   updated. Baseline `python3 -m unittest` + web tests green before changes.
 - **B — firmware + proto + firmware tests.** Proto (§7); handler
   `src/studio/fast_keymap_handler.c` split into helpers
-  (`src/fingerprint.c`, `src/binding_pack.c`, `src/behavior_alias.c`,
-  `src/default_keymap.c`); Kconfig; buffers. native_sim unit tests under
+  (`src/fingerprint.c`, `src/binding_pack.c`, `src/behavior_alias.c`); Kconfig;
+  buffers. (No `default_keymap.c` — use the ZMK stock-keymap accessor, §2.) native_sim unit tests under
   `tests/` covering: snapshot fields/fingerprint stability, behavior list +
   alias, packed bindings round-trip, edited-diff (edit a binding via
   `zmk_keymap_set_layer_binding_at_idx` in a test hook, assert the diff),

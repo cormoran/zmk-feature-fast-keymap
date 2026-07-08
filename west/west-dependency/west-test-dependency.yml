@@ -8,7 +8,11 @@ manifest:
   projects:
     - name: zmk
       remote: cormoran
-      revision: main+custom-studio-protocol
+      # Branched off main+custom-studio-protocol; adds the public
+      # zmk_stock_keymap_get_layer_binding_at_idx() accessor this module uses
+      # for the default-keymap / edited-only diff (see DESIGN.md §2). Switch
+      # back to main+custom-studio-protocol once that PR merges.
+      revision: pr/main+custom-studio-protocol/expose-stock-keymap
       import:
         file: app/west.yml
       clone-depth: 1
