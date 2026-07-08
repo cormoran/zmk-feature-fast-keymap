@@ -451,6 +451,22 @@ static int test_alias_resolution(void) {
         }
     }
 
+    /* tests/studio/native_sim.keymap defines a custom (non-built-in)
+     * hold-tap `myht: my_hold_tap {...}` referenced from layer_1. Its
+     * device name ("my_hold_tap") isn't in any hardcoded table -- proving
+     * this resolves via the compile-time devicetree node-label walk, not a
+     * fixed list of ZMK built-ins. */
+    const struct behavior_summary_entry *custom = find_behavior_by_alias(&captured, "myht");
+    if (!custom) {
+        LOG_ERR("list_behaviors did not resolve alias 'myht' for the custom hold-tap (count=%u)",
+                (unsigned int)captured.count);
+        return -EINVAL;
+    }
+    if (custom->standard) {
+        LOG_ERR("custom behavior 'myht' should NOT be reported as standard");
+        return -EINVAL;
+    }
+
     LOG_INF("PASS: fast_keymap_alias_resolution");
     return 0;
 }

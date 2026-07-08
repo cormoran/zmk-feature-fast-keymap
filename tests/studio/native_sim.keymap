@@ -1,6 +1,19 @@
 #include "../test.dtsi"
 
 / {
+	behaviors {
+		/* Custom/user-defined behavior (not a ZMK built-in) -- exercises
+		 * that fk_behavior_alias() resolves node labels for behaviors the
+		 * firmware doesn't know about ahead of time, not just built-ins. */
+		myht: my_hold_tap {
+			compatible = "zmk,behavior-hold-tap";
+			#binding-cells = <2>;
+			bindings = <&kp>, <&kp>;
+			tapping-term-ms = <200>;
+			flavor = "tap-preferred";
+		};
+	};
+
 	keymap {
 		default_layer {
 			bindings = <
@@ -14,7 +27,7 @@
 			bindings = <
 			&kp C
 			&kp D
-			&trans
+			&myht LSHFT F
 			&trans
 			>;
 		};

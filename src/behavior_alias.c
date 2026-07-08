@@ -8,98 +8,88 @@
 
 #include <string.h>
 
+#include <zephyr/devicetree.h>
 #include <zephyr/sys/util.h>
 
 #include <drivers/behavior.h>
 #include <zmk/behavior.h>
 
 /*
- * Best-effort device -> alias table (DESIGN.md SS2.1).
+ * Device -> alias table (DESIGN.md SS2.1), built at COMPILE time from a
+ * devicetree walk over every child of /behaviors (ZMK built-ins AND
+ * custom/user-defined behaviors, e.g. a user's `ht: hold_tap {...}`) and,
+ * if present, /macros (the node keymap authors conventionally use for their
+ * own `zmk,behavior-macro` definitions -- see e.g.
+ * dependencies/zmk/app/boards/shields/tester_xiao/tester_xiao.keymap).
  *
- * DESIGN.md originally called for a compile-time devicetree walk (either
- * `DT_FOREACH_STATUS_OKAY(<compat>, FN)` over ZMK's built-in behavior
- * compatibles, or `DT_FOREACH_CHILD_STATUS_OKAY` over DT_PATH(behaviors) /
- * DT_PATH(macros)) that resolves each matched node straight to a
- * `DEVICE_DT_GET(node_id)` device pointer at compile time.
+ * For each child node this maps DEVICE_DT_NAME(node_id) -- the plain string
+ * constant DEVICE_DT_DEFINE() bakes into `struct device.name`, i.e. the
+ * exact string `dev->name` holds at runtime -- to the node's FIRST
+ * devicetree *node label* (the `foo:` token used to reference it from
+ * bindings, e.g. `kp` for `&kp`; NOT the unrelated `label` *property*).
  *
- * That approach turned out to be unsafe: every one of ZMK's built-in
- * behavior nodes is declared with `#if ZMK_BEHAVIOR_OMIT(NAME) /omit-if-no-ref/
- * #endif` (dependencies/zmk/app/dts/behaviors/*.dtsi), and ZMK_BEHAVIOR_OMIT()
- * defaults to true for every behavior unless a keyboard's config explicitly
- * opts it back in (dependencies/zmk/app/include/dt-bindings/zmk/behaviors.h).
- * A behavior that no binding anywhere in the active devicetree references
- * (e.g. &bl, &rgb_ug, &soft_off, the mouse-move/scroll/click behaviors, on a
- * keymap that never uses them) keeps its devicetree node/ordinal (so
- * DT_FOREACH_STATUS_OKAY/DEVICE_DT_GET still compile) but never gets a
- * `struct device` linked in -- DEVICE_DT_GET() on it compiles fine and then
- * fails at LINK time with "undefined reference to __device_dts_ord_N".
- * Confirmed by trying it: tests/zmk-config's tester_xiao build failed to
- * link on exactly the six built-ins its keymap/config don't reference
- * (backlight, mouse move/scroll/click, rgb underglow, soft-off). Since which
- * behaviors a *consumer's* keymap references is exactly the kind of thing
- * this module cannot control or predict, any compile-time-resolved device
- * reference to a fixed behavior list is unsafe in general, not just for our
- * own tests.
+ * IMPORTANT (discovered the hard way, see git history): this table must be
+ * built from STRING CONSTANTS ONLY (DEVICE_DT_NAME(), node-label strings)
+ * and must NEVER take a device's address (DEVICE_DT_GET()) at compile
+ * time. Every one of ZMK's built-in behavior nodes is wrapped in
+ * `#if ZMK_BEHAVIOR_OMIT(NAME) /omit-if-no-ref/ #endif`
+ * (dependencies/zmk/app/dts/behaviors/*.dtsi): a behavior nobody's keymap
+ * references keeps its devicetree node/ordinal (so DT_FOREACH_* macros and
+ * DEVICE_DT_NAME() still compile fine on it) but never gets an actual
+ * `struct device` linked in -- DEVICE_DT_GET() on it compiles but fails at
+ * LINK time with "undefined reference to __device_dts_ord_N". Plain string
+ * constants never emit a device symbol reference, so this table is
+ * link-safe regardless of which behaviors a consumer's keymap references.
+ * The runtime lookup in fk_behavior_alias() below only ever sees *devices
+ * that were actually passed in* (i.e. instantiated behaviors), so any
+ * table entries for un-instantiated/omitted nodes are simply never
+ * matched -- harmless.
  *
- * The fix: never take a device's address at compile time. Instead, key the
- * alias table by the behavior's DEVICE NAME STRING (DEVICE_DT_NAME(node_id),
- * i.e. the plain string constant that DEVICE_DT_DEFINE() bakes into
- * `struct device.name` -- see DEVICE_DT_NAME()'s definition in
- * zephyr/device.h: the devicetree node's name, since none of these nodes set
- * an explicit `label` *property* (colon-syntax node labels, e.g. `kp:`, are
- * a different thing and are NOT what ends up in `struct device.name`). Only
- * behaviors that are *actually instantiated* ever reach this table's lookup
- * (STRUCT_SECTION_FOREACH(zmk_behavior_local_id_map, ...) only iterates real
- * devices), so there is nothing to link against and this is safe regardless
- * of which behaviors a keymap does or doesn't use. The device NAME strings
- * below are frozen by dependencies/zmk/app/dts/behaviors/*.dtsi and
- * dependencies/zmk/app/dts/behaviors/macros.dtsi and don't depend on the
- * active devicetree at all.
+ * A node can have zero, one, or several node labels
+ * (DT_NUM_NODELABELS(node_id)); FK_ALIAS_FIRST_LABEL_OR_NULL() below picks
+ * the first one (in devicetree source order) without ever indexing into a
+ * possibly-empty array -- see its comment.
  */
 
 struct fk_alias_name_entry {
     const char *device_name;
-    const char *alias;
+    const char *alias; /* NULL if the node has no node label. */
 };
 
+/*
+ * Expands to the node's first node label as a string literal, or to NULL if
+ * it has none.
+ *
+ * This intentionally does NOT use `DT_NODELABEL_STRING_ARRAY(node_id)[0]`:
+ * that macro expands to a brace-enclosed initializer list (`{ "a", "b", }`),
+ * and (a) indexing it requires wrapping it in a compound literal, whose
+ * element is then a *read* from a static array rather than a compile-time
+ * constant expression suitable for use inside another static initializer,
+ * and (b) for a label-less node the list is empty (`{ }`), which is not a
+ * valid array initializer/subscript target at all. Instead, this pulls the
+ * first label out with plain preprocessor token manipulation: expand
+ * DT_FOREACH_NODELABEL() into a comma-separated list of string literals
+ * (one per label, in source order) and take just the first argument with
+ * GET_ARG_N(1, ...). That list is only ever expanded when
+ * DT_NUM_NODELABELS(node_id) is nonzero (guarded by COND_CODE_0 below), so
+ * GET_ARG_N(1, ...) always has at least one argument to select -- this
+ * works uniformly whether the node has exactly one label or several (e.g.
+ * dependencies/zmk/app/dts/behaviors/sensor_rotate_key_press.dtsi's
+ * `inc_dec_cp: inc_dec_kp: enc_key_press` has two).
+ */
+#define FK_ALIAS_FIRST_LABEL_OR_NULL(node_id)                                                      \
+    COND_CODE_0(                                                                                   \
+        DT_NUM_NODELABELS(node_id), (NULL),                                                        \
+        (GET_ARG_N(1, DT_FOREACH_NODELABEL(node_id, DT_NODELABEL_STRING_ARRAY_ENTRY_INTERNAL))))
+
+#define FK_ALIAS_TABLE_ENTRY(node_id)                                                              \
+    {DEVICE_DT_NAME(node_id), FK_ALIAS_FIRST_LABEL_OR_NULL(node_id)},
+
 static const struct fk_alias_name_entry fk_alias_table[] = {
-    {"key_press", "kp"},
-    {"momentary_layer", "mo"},
-    {"transparent", "trans"},
-    {"none", "none"},
-    {"mod_tap", "mt"},
-    {"layer_tap", "lt"},
-    {"grave_escape", "gresc"},
-    {"toggle_layer", "tog"},
-    {"to_layer", "to"},
-    {"sticky_key", "sk"},
-    {"sticky_layer", "sl"},
-    {"key_toggle", "kt"},
-    {"caps_word", "caps_word"},
-    {"rgb_ug", "rgb_ug"},
-    {"outputs", "out"},
-    {"z_so_off", "soft_off"},
-    {"key_repeat", "key_repeat"},
-    {"bcklight", "bl"},
-    {"bluetooth", "bt"},
-    {"extpower", "ext_power"},
-    {"studio_unlock", "studio_unlock"},
-    {"sysreset", "sys_reset"},
-    {"bootload", "bootloader"},
-    {"macro_tap", "macro_tap"},
-    {"macro_press", "macro_press"},
-    {"macro_release", "macro_release"},
-    {"macro_tap_time", "macro_tap_time"},
-    {"macro_wait_time", "macro_wait_time"},
-    {"macro_pause_for_release", "macro_pause_for_release"},
-    {"macro_param_1to1", "macro_param_1to1"},
-    {"macro_param_1to2", "macro_param_1to2"},
-    {"macro_param_2to1", "macro_param_2to1"},
-    {"macro_param_2to2", "macro_param_2to2"},
-    {"mouse_key_press", "mkp"},
-    {"mouse_move", "mmv"},
-    {"mouse_scroll", "msc"},
-    {"enc_key_press", "inc_dec_kp"},
+    DT_FOREACH_CHILD_STATUS_OKAY(DT_PATH(behaviors), FK_ALIAS_TABLE_ENTRY)
+#if DT_NODE_EXISTS(DT_PATH(macros))
+        DT_FOREACH_CHILD_STATUS_OKAY(DT_PATH(macros), FK_ALIAS_TABLE_ENTRY)
+#endif
 };
 
 const char *fk_behavior_alias(const struct device *dev) {
@@ -135,6 +125,65 @@ const char *fk_behavior_display_name(const struct device *dev) {
     return dev->name;
 }
 
+/*
+ * ZMK's built-in behaviors' devicetree node NAMES (not aliases -- some
+ * built-ins have a different node label than node name, e.g. `bl:
+ * bcklight`), frozen by dependencies/zmk/app/dts/behaviors/*.dtsi and
+ * dependencies/zmk/app/dts/behaviors/macros.dtsi. This is intentionally
+ * separate from fk_alias_table above: that table now also contains
+ * custom/user-defined behaviors and macros, so "is this device_name in the
+ * alias table" is no longer a valid definition of "standard".
+ */
+static const char *const fk_builtin_device_names[] = {
+    "key_press",
+    "momentary_layer",
+    "transparent",
+    "none",
+    "mod_tap",
+    "layer_tap",
+    "grave_escape",
+    "toggle_layer",
+    "to_layer",
+    "sticky_key",
+    "sticky_layer",
+    "key_toggle",
+    "caps_word",
+    "rgb_ug",
+    "outputs",
+    "z_so_off",
+    "key_repeat",
+    "bcklight",
+    "bluetooth",
+    "extpower",
+    "studio_unlock",
+    "sysreset",
+    "bootload",
+    "macro_tap",
+    "macro_press",
+    "macro_release",
+    "macro_tap_time",
+    "macro_wait_time",
+    "macro_pause_for_release",
+    "macro_param_1to1",
+    "macro_param_1to2",
+    "macro_param_2to1",
+    "macro_param_2to2",
+    "mouse_key_press",
+    "mouse_move",
+    "mouse_scroll",
+    "enc_key_press",
+};
+
 bool fk_behavior_is_standard(const struct device *dev) {
-    return dev && dev->name && fk_behavior_alias(dev) != NULL;
+    if (!dev || !dev->name) {
+        return false;
+    }
+
+    for (size_t i = 0; i < ARRAY_SIZE(fk_builtin_device_names); i++) {
+        if (strcmp(fk_builtin_device_names[i], dev->name) == 0) {
+            return true;
+        }
+    }
+
+    return false;
 }
