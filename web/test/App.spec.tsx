@@ -3,10 +3,25 @@ import userEvent from "@testing-library/user-event";
 import { setupZMKMocks } from "@cormoran/zmk-studio-react-hook/testing";
 import App from "../src/App";
 
-// Mock the ZMK client
+// Mock the ZMK client. MetaError must be a real class (not just omitted):
+// FastKeymapSection's automatic load (see below) runs `isUnlockRequiredError`
+// on any load failure, which does `error instanceof MetaError` -- without
+// this, a fixture that doesn't queue enough call_rpc responses for the
+// auto-triggered fast-keymap load (only device-info + subsystem-list are
+// queued below) crashes with "Right-hand side of 'instanceof' is not an
+// object" instead of just surfacing as a (harmless, for these tests) load
+// error.
 jest.mock("@zmkfirmware/zmk-studio-ts-client", () => ({
   create_rpc_connection: jest.fn(),
   call_rpc: jest.fn(),
+  MetaError: class MetaError extends Error {
+    condition: number;
+    constructor(condition: number) {
+      super(`meta error: ${condition}`);
+      this.condition = condition;
+      Object.setPrototypeOf(this, MetaError.prototype);
+    }
+  },
 }));
 
 jest.mock("@zmkfirmware/zmk-studio-ts-client/transport/gatt", () => ({
@@ -70,15 +85,20 @@ describe("App Component", () => {
     it("should render footer with repo link", () => {
       render(<App />);
 
-      expect(screen.getByText(/zmk-fast-keymap/i)).toBeInTheDocument();
+      // Pre-existing note: a loose `getByText(/zmk-fast-keymap/i)` here would
+      // be ambiguous -- the header <h1>, the footer's plain-text repo name,
+      // and the link text below all match that substring. Assert the actual
+      // link elements directly instead.
       // In the pristine template, GITHUB_REPO and TEMPLATE_CREDIT_REPO happen
-      // to share the same placeholder value -- scripts/init_module.py only
-      // rewrites the former (the latter is permanently exempted), so after
-      // initialization only one of these links still reads this text.
+      // to share the same placeholder value, so both footer links read the
+      // same text there. scripts/init_module.py only rewrites GITHUB_REPO
+      // (TEMPLATE_CREDIT_REPO is permanently exempted -- see App.tsx's
+      // comment on it), so after initialization -- this module's actual
+      // state -- only one link still reads this text.
       const links = screen.getAllByRole("link", {
         name: "cormoran/zmk-fast-keymap",
       });
-      expect(links.length).toBe(2);
+      expect(links.length).toBe(1);
       for (const link of links) {
         expect(link).toHaveAttribute(
           "href",
@@ -172,7 +192,7 @@ describe("App Component", () => {
       });
 
       expect(screen.getByText(/Disconnect/i)).toBeInTheDocument();
-      expect(screen.getByText(/RPC Test/i)).toBeInTheDocument();
+      expect(screen.getByText(/Fast Keymap/i)).toBeInTheDocument();
     });
 
     it("should connect to device via Bluetooth when connect button is clicked", async () => {

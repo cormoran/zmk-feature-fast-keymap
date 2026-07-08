@@ -1,0 +1,387 @@
+import { act, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import {
+  createConnectedMockZMKApp,
+  ZMKAppProvider,
+} from "@cormoran/zmk-studio-react-hook/testing";
+import { FastKeymapSection, SUBSYSTEM_IDENTIFIER } from "../src/App";
+import {
+  Request,
+  Response,
+  type Snapshot,
+} from "../src/proto/cormoran/fast-keymap/fast_keymap";
+import {
+  FK_DEFINITION_VERSION,
+  bundledMetadataFp,
+} from "../src/standardBehaviors";
+import { LockState } from "@zmkfirmware/zmk-studio-ts-client/core";
+
+// Mock the ZMK client so we can control call_rpc responses directly: both
+// useStudioLockState's initial getLockState query and useCustomSubsystem's
+// callRPC go through this module. Same pattern as App.spec.tsx /
+// fastKeymap.spec.ts's fixture, just exercised over the wire (encode/decode)
+// this time since we're testing the full component.
+jest.mock("@zmkfirmware/zmk-studio-ts-client", () => ({
+  create_rpc_connection: jest.fn(),
+  call_rpc: jest.fn(),
+  MetaError: class MetaError extends Error {
+    condition: number;
+    constructor(condition: number) {
+      super(`meta error: ${condition}`);
+      this.condition = condition;
+      Object.setPrototypeOf(this, MetaError.prototype);
+    }
+  },
+}));
+
+const UNLOCK_REQUIRED = 1; // zmk.meta.ErrorConditions.UNLOCK_REQUIRED
+
+// A minimal 1-behavior (bundled &kp), 1-layer (no edits) device fixture.
+// The interesting cache/diff-assembly paths are covered directly against
+// loadFastKeymap() in fastKeymap.spec.ts; this file only needs to prove the
+// component wires the client up correctly end-to-end (over real
+// encode/decode) and that the unlock flow still works.
+const SNAPSHOT: Snapshot = {
+  definitionVersion: FK_DEFINITION_VERSION,
+  behaviorsFp: 1,
+  defaultKeymapFp: 2,
+  keymapFp: 3,
+  physicalLayoutFp: 4,
+  behaviorCount: 1,
+  maxLayerNameLength: 8,
+  availableLayers: 1,
+  activeLayoutIndex: 0,
+  layers: [
+    {
+      id: 0,
+      name: "Base",
+      bindingCount: 1,
+      fp: 10,
+      defaultFp: 10,
+      editedCount: 0,
+    },
+  ],
+};
+
+function buildResponse(request: Request): Response {
+  if (request.getSnapshot) {
+    return { snapshot: SNAPSHOT };
+  }
+  if (request.listBehaviors) {
+    return {
+      listBehaviors: {
+        behaviors: [
+          {
+            localId: 1,
+            alias: "kp",
+            displayName: "Key Press",
+            metadataFp: bundledMetadataFp("kp")!,
+            standard: true,
+          },
+        ],
+      },
+    };
+  }
+  if (request.getLayer) {
+    return {
+      getLayer: {
+        id: 0,
+        name: "Base",
+        bindings: [{ behaviorId: 1, param1: 4, param2: 0 }],
+      },
+    };
+  }
+  if (request.getPhysicalLayouts) {
+    return {
+      getPhysicalLayouts: {
+        activeLayoutIndex: 0,
+        layouts: [{ name: "Default", keys: [] }],
+      },
+    };
+  }
+  throw new Error(
+    `FastKeymapSection.spec fixture: unhandled request ${JSON.stringify(request)}`
+  );
+}
+
+describe("FastKeymapSection", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  describe("Without ZMKAppContext", () => {
+    it("should not render", () => {
+      const { container } = render(<FastKeymapSection />);
+      expect(container.firstChild).toBeNull();
+    });
+  });
+
+  describe("Without subsystem", () => {
+    it("shows a warning when the subsystem is not found", () => {
+      const mockZMKApp = createConnectedMockZMKApp({
+        deviceName: "Test Device",
+        subsystems: [],
+      });
+
+      render(
+        <ZMKAppProvider value={mockZMKApp}>
+          <FastKeymapSection />
+        </ZMKAppProvider>
+      );
+
+      expect(
+        screen.getByText(/Subsystem "cormoran__fast_keymap" not found/i)
+      ).toBeInTheDocument();
+      const link = screen.getByRole("link", { name: /module README/i });
+      expect(link).toHaveAttribute(
+        "href",
+        "https://github.com/cormoran/zmk-fast-keymap#readme"
+      );
+    });
+  });
+
+  describe("Successful load", () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const zmkClient = require("@zmkfirmware/zmk-studio-ts-client");
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+      zmkClient.call_rpc.mockImplementation(
+        (
+          _connection: unknown,
+          req: {
+            core?: { getLockState?: boolean };
+            custom?: { call?: { payload: Uint8Array } };
+          }
+        ) => {
+          if (req.core?.getLockState) {
+            return Promise.resolve({
+              core: {
+                getLockState: LockState.ZMK_STUDIO_CORE_LOCK_STATE_UNLOCKED,
+              },
+            });
+          }
+          if (req.custom?.call) {
+            const decoded = Request.decode(req.custom.call.payload);
+            const response = buildResponse(decoded);
+            return Promise.resolve({
+              custom: { call: { payload: Response.encode(response).finish() } },
+            });
+          }
+          return Promise.reject(new Error("unexpected call_rpc request"));
+        }
+      );
+    });
+
+    it("loads automatically on connect and renders behaviors, layers and the .keymap export", async () => {
+      const mockZMKApp = createConnectedMockZMKApp({
+        deviceName: "Test Device",
+        subsystems: [SUBSYSTEM_IDENTIFIER],
+      });
+
+      render(
+        <ZMKAppProvider value={mockZMKApp}>
+          <FastKeymapSection />
+        </ZMKAppProvider>
+      );
+
+      expect(screen.getByText(/Fast Keymap/i)).toBeInTheDocument();
+
+      await waitFor(() => {
+        expect(screen.getByText(/Behaviors \(1\)/i)).toBeInTheDocument();
+      });
+
+      expect(screen.getByText("&kp")).toBeInTheDocument();
+      expect(screen.getByText(/Key Press/i)).toBeInTheDocument();
+      // Exact match: the stats badge above also contains the substring
+      // "bundled" (e.g. "behaviors (1 bundled, 0 fetched)"), so a loose
+      // regex would be ambiguous -- this asserts the per-behavior source
+      // tag specifically.
+      expect(screen.getByText("bundled")).toBeInTheDocument();
+
+      expect(screen.getByText(/Layers \(1\)/i)).toBeInTheDocument();
+      expect(screen.getByText("Base")).toBeInTheDocument();
+      expect(screen.getByText("&kp 4")).toBeInTheDocument();
+
+      const exportTextarea = screen.getByLabelText(
+        /\.keymap export/i
+      ) as HTMLTextAreaElement;
+      expect(exportTextarea.value).toContain("&kp 4");
+      expect(exportTextarea.value).toContain("base {");
+    });
+
+    it("shows a cache-hit indicator on a second load once the cache is warm", async () => {
+      const mockZMKApp = createConnectedMockZMKApp({
+        deviceName: "Test Device",
+        subsystems: [SUBSYSTEM_IDENTIFIER],
+      });
+
+      render(
+        <ZMKAppProvider value={mockZMKApp}>
+          <FastKeymapSection />
+        </ZMKAppProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText(/Behaviors \(1\)/i)).toBeInTheDocument();
+      });
+
+      const user = userEvent.setup();
+      await user.click(screen.getByText(/Reload/i));
+
+      await waitFor(() => {
+        expect(
+          screen.getByText(/1 \/ 1 layers from cache/i)
+        ).toBeInTheDocument();
+      });
+    });
+  });
+
+  describe("Unlock flow", () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const zmkClient = require("@zmkfirmware/zmk-studio-ts-client");
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+    });
+
+    function mockCallRpc({
+      lockState,
+      customResult,
+    }: {
+      lockState: LockState;
+      customResult: "unlock-required" | "success";
+    }) {
+      zmkClient.call_rpc.mockImplementation(
+        (
+          _connection: unknown,
+          req: {
+            core?: { getLockState?: boolean };
+            custom?: { call?: { payload: Uint8Array } };
+          }
+        ) => {
+          if (req.core?.getLockState) {
+            return Promise.resolve({ core: { getLockState: lockState } });
+          }
+          if (req.custom?.call) {
+            if (customResult === "unlock-required") {
+              return Promise.reject(new zmkClient.MetaError(UNLOCK_REQUIRED));
+            }
+            const decoded = Request.decode(req.custom.call.payload);
+            const response = buildResponse(decoded);
+            return Promise.resolve({
+              custom: { call: { payload: Response.encode(response).finish() } },
+            });
+          }
+          return Promise.reject(new Error("unexpected call_rpc request"));
+        }
+      );
+    }
+
+    it("shows the unlock prompt when the initial load is rejected with UNLOCK_REQUIRED", async () => {
+      mockCallRpc({
+        lockState: LockState.ZMK_STUDIO_CORE_LOCK_STATE_UNLOCKED,
+        customResult: "unlock-required",
+      });
+
+      const mockZMKApp = createConnectedMockZMKApp({
+        subsystems: [SUBSYSTEM_IDENTIFIER],
+      });
+
+      render(
+        <ZMKAppProvider value={mockZMKApp}>
+          <FastKeymapSection />
+        </ZMKAppProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText(/ZMK Studio is locked/i)).toBeInTheDocument();
+      });
+      expect(screen.getByText("Retry")).toBeInTheDocument();
+    });
+
+    it("auto-retries and renders once a lockStateChanged notification reports unlocked", async () => {
+      mockCallRpc({
+        lockState: LockState.ZMK_STUDIO_CORE_LOCK_STATE_UNLOCKED,
+        customResult: "unlock-required",
+      });
+
+      let coreCallback:
+        | ((notification: { lockStateChanged?: LockState }) => void)
+        | undefined;
+      const mockZMKApp = createConnectedMockZMKApp({
+        subsystems: [SUBSYSTEM_IDENTIFIER],
+      });
+      mockZMKApp.onNotification = jest.fn((subscription) => {
+        if (subscription.type === "core") {
+          coreCallback = subscription.callback;
+        }
+        return () => {};
+      });
+
+      render(
+        <ZMKAppProvider value={mockZMKApp}>
+          <FastKeymapSection />
+        </ZMKAppProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Retry")).toBeInTheDocument();
+      });
+
+      mockCallRpc({
+        lockState: LockState.ZMK_STUDIO_CORE_LOCK_STATE_UNLOCKED,
+        customResult: "success",
+      });
+
+      expect(coreCallback).toBeDefined();
+      await act(async () => {
+        coreCallback?.({
+          lockStateChanged: LockState.ZMK_STUDIO_CORE_LOCK_STATE_LOCKED,
+        });
+      });
+      await act(async () => {
+        coreCallback?.({
+          lockStateChanged: LockState.ZMK_STUDIO_CORE_LOCK_STATE_UNLOCKED,
+        });
+      });
+
+      await waitFor(() => {
+        expect(screen.getByText(/Behaviors \(1\)/i)).toBeInTheDocument();
+      });
+    });
+
+    it("retries manually via the Retry button and renders the result", async () => {
+      mockCallRpc({
+        lockState: LockState.ZMK_STUDIO_CORE_LOCK_STATE_UNLOCKED,
+        customResult: "unlock-required",
+      });
+
+      const mockZMKApp = createConnectedMockZMKApp({
+        subsystems: [SUBSYSTEM_IDENTIFIER],
+      });
+
+      render(
+        <ZMKAppProvider value={mockZMKApp}>
+          <FastKeymapSection />
+        </ZMKAppProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Retry")).toBeInTheDocument();
+      });
+
+      mockCallRpc({
+        lockState: LockState.ZMK_STUDIO_CORE_LOCK_STATE_UNLOCKED,
+        customResult: "success",
+      });
+
+      const user = userEvent.setup();
+      await user.click(screen.getByText("Retry"));
+
+      await waitFor(() => {
+        expect(screen.getByText(/Behaviors \(1\)/i)).toBeInTheDocument();
+      });
+    });
+  });
+});

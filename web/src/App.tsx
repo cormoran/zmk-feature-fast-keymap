@@ -1,4 +1,4 @@
-import { useContext, useEffect, useState } from "react";
+import { useCallback, useContext, useEffect, useState } from "react";
 import "./App.css";
 import { connect as gattConnect } from "@zmkfirmware/zmk-studio-ts-client/transport/gatt";
 import {
@@ -12,6 +12,15 @@ import {
   connectSerial,
 } from "@cormoran/zmk-studio-react-hook";
 import { Request, Response } from "./proto/cormoran/fast-keymap/fast_keymap";
+import {
+  exportKeymapText,
+  formatBindingToken,
+  indexBehaviorsById,
+  loadFastKeymap,
+  type FastKeymapBehavior,
+  type FastKeymapLayer,
+  type FastKeymapModel,
+} from "./fastKeymap";
 
 export const SUBSYSTEM_IDENTIFIER = "cormoran__fast_keymap";
 
@@ -101,7 +110,7 @@ function App() {
               </button>
             </section>
 
-            <RPCTestSection />
+            <FastKeymapSection />
           </>
         )}
       />
@@ -142,51 +151,158 @@ function App() {
   );
 }
 
-export function RPCTestSection() {
+/** Renders a `FastKeymapLoadStats` boolean as a small "loaded from cache"
+ * vs. "fetched from device" badge -- makes the fast-load caching visible in
+ * the UI (DESIGN.md SS9 "C" asks for this explicitly). */
+function CacheBadge({ cached, label }: { cached: boolean; label: string }) {
+  return (
+    <span className={`badge ${cached ? "badge-cache" : "badge-fetch"}`}>
+      {cached ? "⚡" : "📡"} {label}
+    </span>
+  );
+}
+
+function BehaviorList({ behaviors }: { behaviors: FastKeymapBehavior[] }) {
+  return (
+    <ul className="behavior-list">
+      {behaviors.map((behavior) => (
+        <li key={behavior.localId}>
+          <code>&amp;{behavior.alias || `behavior_${behavior.localId}`}</code> —{" "}
+          {behavior.displayName || "(unnamed)"}{" "}
+          <span className="badge-source">
+            {behavior.resolvedFrom === "bundle" && "bundled"}
+            {behavior.resolvedFrom === "cache" && "cached"}
+            {behavior.resolvedFrom === "device" && "fetched"}
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function LayerList({
+  layers,
+  behaviors,
+}: {
+  layers: FastKeymapLayer[];
+  behaviors: FastKeymapBehavior[];
+}) {
+  const behaviorsById = indexBehaviorsById(behaviors);
+
+  return (
+    <div className="layer-list">
+      {layers.map((layer) => (
+        <div className="layer-block" key={layer.id}>
+          <h4>
+            {layer.name || `Layer ${layer.id}`}{" "}
+            <CacheBadge cached={layer.loadedFromCache} label="keymap" />
+          </h4>
+          <p className="layer-bindings">
+            {layer.bindings
+              .map((binding) => formatBindingToken(binding, behaviorsById))
+              .join("  ")}
+          </p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ExportPanel({ model }: { model: FastKeymapModel }) {
+  const [copyStatus, setCopyStatus] = useState<"idle" | "copied" | "failed">(
+    "idle"
+  );
+  const keymapText = exportKeymapText(model);
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(keymapText);
+      setCopyStatus("copied");
+    } catch (error) {
+      console.error("Failed to copy .keymap text:", error);
+      setCopyStatus("failed");
+    }
+  };
+
+  return (
+    <div className="export-panel">
+      <h3>Export .keymap</h3>
+      <button className="btn btn-secondary" onClick={() => void copy()}>
+        📋 Copy .keymap
+      </button>
+      {copyStatus === "copied" && <span> Copied!</span>}
+      {copyStatus === "failed" && (
+        <span> Copy failed -- select the text below manually.</span>
+      )}
+      <textarea
+        readOnly
+        aria-label=".keymap export"
+        className="keymap-export-text"
+        value={keymapText}
+        rows={12}
+      />
+    </div>
+  );
+}
+
+export function FastKeymapSection() {
   const zmkApp = useContext(ZMKAppContext);
   const { ready, subsystem, call } = useCustomSubsystem(SUBSYSTEM_IDENTIFIER, {
     encode: (r: Request) => Request.encode(r).finish(),
     decode: Response.decode,
   });
   const { locked } = useStudioLockState();
-  const [inputValue, setInputValue] = useState<number>(42);
-  const [response, setResponse] = useState<string | null>(null);
+  const [model, setModel] = useState<FastKeymapModel | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [awaitingUnlock, setAwaitingUnlock] = useState(false);
 
-  const sendSampleRequest = async () => {
+  // Fast-load caching is keyed per-device (DESIGN.md SS9 "C") -- fall back
+  // to a fixed key when the device name isn't known yet so a first load
+  // still works (it just may share a cache with other unnamed devices).
+  const deviceKey = zmkApp?.state.deviceInfo?.name;
+
+  const load = useCallback(async () => {
     if (!ready) return;
 
     setIsLoading(true);
-    setResponse(null);
+    setError(null);
 
     try {
-      const resp = await call({ sample: { value: inputValue } });
+      const loaded = await loadFastKeymap(call, { deviceKey });
       setAwaitingUnlock(false);
-      console.log("Decoded response:", resp);
-
-      if (resp?.sample) {
-        setResponse(resp.sample.value);
-      } else if (resp?.error) {
-        setResponse(`Error: ${resp.error.message}`);
-      }
-    } catch (error) {
-      if (isUnlockRequiredError(error)) {
+      setModel(loaded);
+    } catch (err) {
+      if (isUnlockRequiredError(err)) {
         setAwaitingUnlock(true);
       } else {
-        console.error("RPC call failed:", error);
-        setResponse(
-          `Failed: ${error instanceof Error ? error.message : "Unknown error"}`
-        );
+        console.error("Fast keymap load failed:", err);
+        setError(err instanceof Error ? err.message : "Unknown error");
       }
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [ready, call, deviceKey]);
+
+  // Load automatically once the subsystem is ready -- this is the whole
+  // point of the fast-load client: no manual "fetch" step needed. `load()`
+  // sets state asynchronously (after its awaits), not synchronously within
+  // the effect body itself, but the linter can't see through that --
+  // suppress both rules it flags here (same rationale as the unlock-retry
+  // effect below).
+  useEffect(() => {
+    if (ready) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      void load();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready]);
 
   // Auto-retry once the device reports it's unlocked again -- covers the
   // common case where the user presses &studio_unlock after seeing the
-  // prompt below without needing to click "Retry" themselves.
+  // prompt below without needing to click "Retry" themselves. (This
+  // subsystem is unsecured by default -- see DESIGN.md SS1 -- but the web
+  // template's unlock flow is kept working in case a fork secures it.)
   useEffect(() => {
     if (awaitingUnlock && !locked) {
       // This mirrors an external system (the device's lock state) rather
@@ -195,7 +311,7 @@ export function RPCTestSection() {
       // pattern used by useStudioLockState itself).
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setAwaitingUnlock(false);
-      void sendSampleRequest();
+      void load();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [locked]);
@@ -221,8 +337,7 @@ export function RPCTestSection() {
 
   return (
     <section className="card">
-      <h2>RPC Test</h2>
-      <p>Send a sample request to the firmware:</p>
+      <h2>Fast Keymap</h2>
 
       {locked && (
         <div className="locked-banner">
@@ -230,23 +345,13 @@ export function RPCTestSection() {
         </div>
       )}
 
-      <div className="input-group">
-        <label htmlFor="value-input">Value:</label>
-        <input
-          id="value-input"
-          type="number"
-          value={inputValue}
-          onChange={(e) => setInputValue(parseInt(e.target.value) || 0)}
-        />
-      </div>
+      {isLoading && <p>⏳ Loading keymap...</p>}
 
-      <button
-        className="btn btn-primary"
-        disabled={isLoading || locked}
-        onClick={sendSampleRequest}
-      >
-        {isLoading ? "⏳ Sending..." : "📤 Send Request"}
-      </button>
+      {error && (
+        <div className="error-message">
+          <p>🚨 {error}</p>
+        </div>
+      )}
 
       {awaitingUnlock && (
         <div className="unlock-prompt card">
@@ -255,17 +360,49 @@ export function RPCTestSection() {
             <code>&amp;studio_unlock</code> behavior) on your keyboard — the
             request will retry automatically.
           </p>
-          <button className="btn btn-secondary" onClick={sendSampleRequest}>
+          <button className="btn btn-secondary" onClick={() => void load()}>
             Retry
           </button>
         </div>
       )}
 
-      {response && (
-        <div className="response-box">
-          <h3>Response from Firmware:</h3>
-          <pre>{response}</pre>
-        </div>
+      <button
+        className="btn btn-primary"
+        disabled={isLoading || locked}
+        onClick={() => void load()}
+      >
+        🔄 Reload
+      </button>
+
+      {model && (
+        <>
+          <div className="stats-badges">
+            <CacheBadge
+              cached={model.stats.behaviorsFromCache}
+              label={
+                model.stats.behaviorsFromCache
+                  ? "behaviors"
+                  : `behaviors (${model.stats.behaviorsBundled} bundled, ${model.stats.behaviorsFetched} fetched)`
+              }
+            />
+            <CacheBadge
+              cached={model.stats.physicalLayoutsFromCache}
+              label="physical layouts"
+            />
+            <span className="badge">
+              {model.stats.layersFromCache} / {model.layers.length} layers from
+              cache
+            </span>
+          </div>
+
+          <h3>Behaviors ({model.behaviors.length})</h3>
+          <BehaviorList behaviors={model.behaviors} />
+
+          <h3>Layers ({model.layers.length})</h3>
+          <LayerList layers={model.layers} behaviors={model.behaviors} />
+
+          <ExportPanel model={model} />
+        </>
       )}
     </section>
   );
