@@ -5,7 +5,7 @@ import {
   ZMKAppProvider,
 } from "@cormoran/zmk-studio-react-hook/testing";
 import { RPCTestSection, SUBSYSTEM_IDENTIFIER } from "../src/App";
-import { Response } from "../src/proto/your-name/template/template";
+import { Response } from "../src/proto/cormoran/fast-keymap/fast_keymap";
 import { LockState } from "@zmkfirmware/zmk-studio-ts-client/core";
 
 // Mock the ZMK client so we can control call_rpc responses directly: both
@@ -76,17 +76,17 @@ describe("RPCTestSection Component", () => {
       );
 
       expect(
-        screen.getByText(/Subsystem "your_name__template" not found/i)
+        screen.getByText(/Subsystem "cormoran__fast_keymap" not found/i)
       ).toBeInTheDocument();
       expect(
         screen.getByText(
-          /Make sure your firmware includes the template module/i
+          /Make sure your firmware includes the fast-keymap module/i
         )
       ).toBeInTheDocument();
       const link = screen.getByRole("link", { name: /module README/i });
       expect(link).toHaveAttribute(
         "href",
-        "https://github.com/cormoran/zmk-module-template#readme"
+        "https://github.com/cormoran/zmk-fast-keymap#readme"
       );
     });
   });

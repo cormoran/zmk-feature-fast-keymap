@@ -1,0 +1,5 @@
+# Nanopb options file for fast_keymap.proto
+# This defines max sizes for string fields
+
+cormoran.fast_keymap.SampleResponse.value    max_size:64
+cormoran.fast_keymap.ErrorResponse.message   max_size:64

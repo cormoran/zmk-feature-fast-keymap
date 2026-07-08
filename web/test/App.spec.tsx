@@ -59,10 +59,10 @@ describe("App Component", () => {
       render(<App />);
 
       // Scoped to the heading role: the footer's "AI ready ZMK module
-      // template" credit line also matches a plain /ZMK Module Template/i
+      // template" credit line also matches a plain /zmk-fast-keymap/i
       // text query.
       expect(
-        screen.getByRole("heading", { name: /ZMK Module Template/i })
+        screen.getByRole("heading", { name: /zmk-fast-keymap/i })
       ).toBeInTheDocument();
       expect(screen.getByText(/Custom Studio RPC Demo/i)).toBeInTheDocument();
     });
@@ -70,19 +70,19 @@ describe("App Component", () => {
     it("should render footer with repo link", () => {
       render(<App />);
 
-      expect(screen.getByText(/Template Module/i)).toBeInTheDocument();
+      expect(screen.getByText(/zmk-fast-keymap/i)).toBeInTheDocument();
       // In the pristine template, GITHUB_REPO and TEMPLATE_CREDIT_REPO happen
       // to share the same placeholder value -- scripts/init_module.py only
       // rewrites the former (the latter is permanently exempted), so after
       // initialization only one of these links still reads this text.
       const links = screen.getAllByRole("link", {
-        name: "cormoran/zmk-module-template",
+        name: "cormoran/zmk-fast-keymap",
       });
       expect(links.length).toBe(2);
       for (const link of links) {
         expect(link).toHaveAttribute(
           "href",
-          "https://github.com/cormoran/zmk-module-template"
+          "https://github.com/cormoran/zmk-fast-keymap"
         );
       }
     });
@@ -154,7 +154,7 @@ describe("App Component", () => {
       setTransportSupport({ serial: true, bluetooth: true });
       mocks.mockSuccessfulConnection({
         deviceName: "Test Keyboard",
-        subsystems: ["your_name__template"],
+        subsystems: ["cormoran__fast_keymap"],
       });
 
       const { connectSerial } = await import("@cormoran/zmk-studio-react-hook");
@@ -179,7 +179,7 @@ describe("App Component", () => {
       setTransportSupport({ serial: true, bluetooth: true });
       mocks.mockSuccessfulConnection({
         deviceName: "Test Keyboard BLE",
-        subsystems: ["your_name__template"],
+        subsystems: ["cormoran__fast_keymap"],
       });
 
       const { connect: gattConnect } =

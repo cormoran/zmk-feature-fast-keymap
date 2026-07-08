@@ -1,10 +1,10 @@
-config ZMK_TEMPLATE_FEATURE
-    bool "Enable template feature"
+config ZMK_FAST_KEYMAP
+    bool "Enable fast-keymap feature"
 
-if ZMK_TEMPLATE_FEATURE
+if ZMK_FAST_KEYMAP
 
-config ZMK_TEMPLATE_FEATURE_STUDIO_RPC
-    bool "Enable template feature custom Studio RPC"
+config ZMK_FAST_KEYMAP_STUDIO_RPC
+    bool "Enable fast-keymap feature custom Studio RPC"
     depends on ZMK_STUDIO
 
 endif

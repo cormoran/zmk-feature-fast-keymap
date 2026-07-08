@@ -26,9 +26,9 @@ section for the full story):
     `bytes` inside `zmk.custom.CallRequest.payload`/`CallResponse.payload`,
     addressed by a runtime-assigned `subsystem_index` (see dependencies'
     zmk-studio-messages proto/zmk/custom.proto). This module registers
-    itself under the fixed string identifier "your_name__template"
-    (src/studio/template_handler.c,
-    `ZMK_RPC_CUSTOM_SUBSYSTEM(your_name__template, ...)`), always as the
+    itself under the fixed string identifier "cormoran__fast_keymap"
+    (src/studio/fast_keymap_handler.c,
+    `ZMK_RPC_CUSTOM_SUBSYSTEM(cormoran__fast_keymap, ...)`), always as the
     first (and, in this stock template, only) registered subsystem, i.e.
     index 0.
 
@@ -128,7 +128,7 @@ except ImportError:  # pragma: no cover - convenience fallback for local dev
         raise
 
 
-SUBSYSTEM_IDENTIFIER = "your_name__template"
+SUBSYSTEM_IDENTIFIER = "cormoran__fast_keymap"
 # This template registers exactly one custom subsystem, so its index is
 # deterministically 0 -- but see the KNOWN RENODE-ENVIRONMENT LIMITATION
 # note above: `ListCustomSubsystemRequest` (the normal way to discover this
@@ -174,19 +174,18 @@ class RenodeTemplateModuleTests(unittest.TestCase):
         studio_proto_dir = renode_harness.find_studio_proto_dir(REPO_ROOT)
         cls.studio_pb2 = renode_harness.load_studio_pb2(studio_proto_dir)
 
-        # This module's own proto (proto/your-name/template/template.proto,
-        # package your_name.template) -- compiled separately since it lives
+        # This module's own proto (proto/cormoran/fast-keymap/fast_keymap.proto,
+        # package cormoran.fast_keymap) -- compiled separately since it lives
         # outside zmk-studio-messages. protoc normalizes the hyphenated
-        # on-disk path ("your-name") to a valid Python package
-        # ("your_name") in its generated output.
+        # on-disk path to a valid Python package in its generated output.
         out_dir = renode_harness.compile_protos(
-            [REPO_ROOT / "proto" / "your-name" / "template" / "template.proto"],
+            [REPO_ROOT / "proto" / "cormoran" / "fast-keymap" / "fast_keymap.proto"],
             include_dirs=[REPO_ROOT / "proto"],
         )
         sys.path.insert(0, str(out_dir))
-        import your_name.template.template_pb2 as template_pb2  # type: ignore
+        import cormoran.fast_keymap.fast_keymap_pb2 as fast_keymap_pb2  # type: ignore
 
-        cls.template_pb2 = template_pb2
+        cls.fast_keymap_pb2 = fast_keymap_pb2
 
     def setUp(self):
         self.session, self.console, self.rpc = renode_harness.boot_single(
@@ -244,14 +243,14 @@ class RenodeTemplateModuleTests(unittest.TestCase):
         file's module docstring): sending a real SampleRequest to this
         module's own registered subsystem (index 0) should get back a
         SampleResponse with `"Hello from firmware! Received: 42"` (see
-        handle_sample_request() in src/studio/template_handler.c) -- and
+        handle_sample_request() in src/studio/fast_keymap_handler.c) -- and
         does, on real hardware -- but under Renode the ~51-byte response
         never arrives (RPC TX path stalls; smaller callback-free responses
         are unaffected). This test asserts *that exact failure* (a read
         timeout) so it will start failing -- loudly, as a signal to update
         this test to assert the real round trip -- the day the underlying
         emulation/harness limitation is fixed."""
-        inner_req = self.template_pb2.Request()
+        inner_req = self.fast_keymap_pb2.Request()
         inner_req.sample.value = 42
         self._send_call(KNOWN_SUBSYSTEM_INDEX, inner_req.SerializeToString())
 

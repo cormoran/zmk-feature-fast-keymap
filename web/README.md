@@ -1,4 +1,4 @@
-# ZMK Module Template - Web Frontend
+# zmk-fast-keymap - Web Frontend
 
 This is a minimal web application template for interacting with ZMK firmware
 modules that implement custom Studio RPC subsystems.
@@ -51,8 +51,8 @@ src/
 ├── App.tsx               # Main application with connection UI
 ├── App.css               # Styles
 └── proto/                # Generated protobuf TypeScript types
-    └── your-name/template/
-        └── template.ts
+    └── cormoran/fast-keymap/
+        └── fast_keymap.ts
 
 test/
 ├── App.spec.tsx              # Tests for App component
@@ -63,7 +63,7 @@ test/
 
 ### 1. Protocol Definition
 
-The protobuf schema is defined in `../proto/your-name/template/template.proto`.
+The protobuf schema is defined in `../proto/cormoran/fast-keymap/fast_keymap.proto`.
 
 ### 2. Code Generation
 
@@ -83,9 +83,9 @@ higher-level `useCustomSubsystem` hook, which collapses
 
 ```typescript
 import { useCustomSubsystem } from "@cormoran/zmk-studio-react-hook";
-import { Request, Response } from "./proto/your-name/template/template";
+import { Request, Response } from "./proto/cormoran/fast-keymap/fast_keymap";
 
-const { ready, call } = useCustomSubsystem("your_name__template", {
+const { ready, call } = useCustomSubsystem("cormoran__fast_keymap", {
   encode: (r: Request) => Request.encode(r).finish(),
   decode: Response.decode,
 });
@@ -116,7 +116,7 @@ disconnected screen -- no error is shown.
 Secured custom RPCs (and the settings subsystem) reject calls with an
 `UNLOCK_REQUIRED` error while ZMK Studio is locked on the device. This
 template ships the full flow by default, even though the sample firmware
-handler in `src/studio/template_handler.c` is registered as
+handler in `src/studio/fast_keymap_handler.c` is registered as
 `ZMK_STUDIO_RPC_HANDLER_UNSECURED` (so the sample RPC never actually hits it)
 -- switching that handler to `ZMK_STUDIO_RPC_HANDLER_SECURED` requires no web
 changes:
@@ -155,7 +155,7 @@ import {
 
 const mockZMKApp = createConnectedMockZMKApp({
   deviceName: "Test Device",
-  subsystems: ["your_name__template"],
+  subsystems: ["cormoran__fast_keymap"],
 });
 
 render(
@@ -178,7 +178,7 @@ successfully retry the request.
 
 To adapt this template for your own ZMK module:
 
-1. **Update the proto file**: Modify `../proto/your-name/template/template.proto` with
+1. **Update the proto file**: Modify `../proto/cormoran/fast-keymap/fast_keymap.proto` with
    your message types
 2. **Regenerate types**: Run `npm run generate`
 3. **Update subsystem identifier**: Change `SUBSYSTEM_IDENTIFIER` in `App.tsx`

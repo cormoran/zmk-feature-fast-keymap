@@ -1,7 +1,7 @@
-# cormoran's ZMK Module Template for ZMK (with Custom Studio RPC)
+# zmk-fast-keymap
 
 ![ZMK Version](https://img.shields.io/badge/ZMK-master-blue)
-[![Test](https://github.com/cormoran/zmk-module-template/actions/workflows/zmk-module.yml/badge.svg?branch=main)](https://github.com/cormoran/zmk-module-template/actions/workflows/zmk-module.yml) [![Devcontainer](https://github.com/cormoran/zmk-module-template/actions/workflows/devcontainer.yml/badge.svg?branch=main)](https://github.com/cormoran/zmk-module-template/actions/workflows/devcontainer.yml)
+[![Test](https://github.com/cormoran/zmk-fast-keymap/actions/workflows/zmk-module.yml/badge.svg?branch=main)](https://github.com/cormoran/zmk-fast-keymap/actions/workflows/zmk-module.yml) [![Devcontainer](https://github.com/cormoran/zmk-fast-keymap/actions/workflows/devcontainer.yml/badge.svg?branch=main)](https://github.com/cormoran/zmk-fast-keymap/actions/workflows/devcontainer.yml)
 
 This repository contains a template for a ZMK module with Web UI using the **unofficial** custom ZMK Studio RPC protocol.
 
@@ -11,8 +11,8 @@ It's extended from ZMK official template with [zmk-west-commands](https://github
 
 This template includes:
 
-- **Firmware**: Sample custom Studio RPC handler (`src/studio/template_handler.c`)
-- **Protocol**: Protobuf definition (`proto/your-name/template/template.proto`)
+- **Firmware**: Sample custom Studio RPC handler (`src/studio/fast_keymap_handler.c`)
+- **Protocol**: Protobuf definition (`proto/cormoran/fast-keymap/fast_keymap.proto`)
 - **Web UI**: React + TypeScript app (`web/`) using [@cormoran/zmk-studio-react-hook](https://github.com/cormoran/react-zmk-studio)
 - **Tests**: Firmware unit tests (`tests/studio/`) and build tests (`tests/zmk-config/`)
 
@@ -34,7 +34,7 @@ For more info on modules, you can read through through the [Zephyr modules page]
            url-base: https://github.com/cormoran
        projects:
            ...
-           - name: zmk-module-template
+           - name: zmk-fast-keymap
            remote: cormoran
            revision: main+custom-studio-protocol # or latest commit hash
            import: true
@@ -50,11 +50,11 @@ For more info on modules, you can read through through the [Zephyr modules page]
 2. Enable flags in your `config/<shield>.conf`
 
    ```conf
-   CONFIG_ZMK_TEMPLATE_FEATURE=y
+   CONFIG_ZMK_FAST_KEYMAP=y
 
    # Optionally enable custom Studio RPC
    CONFIG_ZMK_STUDIO=y
-   CONFIG_ZMK_TEMPLATE_FEATURE_STUDIO_RPC=y
+   CONFIG_ZMK_FAST_KEYMAP_STUDIO_RPC=y
    CONFIG_ZMK_CUSTOM_SETTINGS=y
    CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC=y
    CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE=128
@@ -62,8 +62,8 @@ For more info on modules, you can read through through the [Zephyr modules page]
    ```
 
 3. Implement your custom protocol by editing:
-   - `proto/your-name/template/template.proto` — message types
-   - `src/studio/template_handler.c` — firmware RPC handler
+   - `proto/cormoran/fast-keymap/fast_keymap.proto` — message types
+   - `src/studio/fast_keymap_handler.c` — firmware RPC handler
    - `web/src/App.tsx` — web UI
 
 ### Web UI
