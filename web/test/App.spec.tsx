@@ -79,7 +79,7 @@ describe("App Component", () => {
       expect(
         screen.getByRole("heading", { name: /zmk-fast-keymap/i })
       ).toBeInTheDocument();
-      expect(screen.getByText(/Custom Studio RPC Demo/i)).toBeInTheDocument();
+      expect(screen.getByText(/cache-friendly keymap/i)).toBeInTheDocument();
     });
 
     it("should render footer with repo link", () => {

@@ -3,68 +3,108 @@
 ![ZMK Version](https://img.shields.io/badge/ZMK-master-blue)
 [![Test](https://github.com/cormoran/zmk-fast-keymap/actions/workflows/zmk-module.yml/badge.svg?branch=main)](https://github.com/cormoran/zmk-fast-keymap/actions/workflows/zmk-module.yml) [![Devcontainer](https://github.com/cormoran/zmk-fast-keymap/actions/workflows/devcontainer.yml/badge.svg?branch=main)](https://github.com/cormoran/zmk-fast-keymap/actions/workflows/devcontainer.yml)
 
-This repository contains a template for a ZMK module with Web UI using the **unofficial** custom ZMK Studio RPC protocol.
+A **read-only** ZMK [Studio](https://zmk.dev/docs/features/studio) module that
+serves your keyboard's behavior list and keymap over a custom
+([unofficial](https://github.com/cormoran/zmk)) Studio RPC subsystem, built to
+**load fast over slow BLE**. It is a cache-friendly companion to ZMK's official
+`keymap`/`behaviors` subsystems, plus a couple of export-oriented extras.
 
-It's extended from ZMK official template with [zmk-west-commands](https://github.com/cormoran/zmk-west-commands), test code template, coding agent support, and custom Studio RPC protocol support.
+It does not change how your keyboard works and it never writes to your keymap —
+it only reads it (e.g. to display or to export a `.keymap` file).
 
-## Summary
+## Why it's fast
 
-This template includes:
+The official flow re-transfers the full behavior metadata and the full keymap on
+every connect. This module instead **sends less**:
 
-- **Firmware**: Sample custom Studio RPC handler (`src/studio/fast_keymap_handler.c`)
-- **Protocol**: Protobuf definition (`proto/cormoran/fast-keymap/fast_keymap.proto`)
-- **Web UI**: React + TypeScript app (`web/`) using [@cormoran/zmk-studio-react-hook](https://github.com/cormoran/react-zmk-studio)
-- **Tests**: Firmware unit tests (`tests/studio/`) and build tests (`tests/zmk-config/`)
+1. **Fingerprint cache keys.** `get_snapshot` returns cheap CRC32 fingerprints
+   for each data group (all behaviors, each layer's current + default bindings,
+   physical layouts). The web client caches by fingerprint and skips re-fetching
+   any group whose fingerprint still matches.
+2. **Bundled standard behaviors.** Metadata for standard ZMK behaviors rarely
+   changes, so the web app ships it, versioned by a definition version. The
+   firmware only transfers metadata for behaviors the client can't resolve from
+   its bundle.
+3. **Default keymap + edited-only diff.** The compiled-in ("stock") keymap only
+   changes when you reflash, so the client caches it and then fetches just the
+   handful of positions you actually edited (`get_edited_layer`).
 
-Read through the [ZMK Module Creation](https://zmk.dev/docs/development/module-creation) page for details on how to configure this template.
+The wire format deliberately mimics ZMK's official protobuf messages (no bespoke
+byte-packing; the RPC response streams, so there is no app-level chunking). The
+speed comes from the caching above, not from re-encoding bytes.
 
-## More Info
+Extras for tooling/export:
 
-For more info on modules, you can read through through the [Zephyr modules page](https://docs.zephyrproject.org/3.5.0/develop/modules.html) and [ZMK's page on using modules](https://zmk.dev/docs/features/modules). [Zephyr's west manifest page](https://docs.zephyrproject.org/3.5.0/develop/west/manifest.html#west-manifests) may also be of use.
+- **Behavior aliases** — each behavior reports its keymap alias (e.g. `kp` for
+  `&kp`, resolved from the devicetree node label, including your custom
+  behaviors), so a client can reconstruct `.keymap` text.
+- **Default vs. edited keymap** — read the pristine compiled-in keymap, the
+  effective keymap, or only the edited positions.
+
+The bundled web app (behaviors browser, keymap viewer, and a **`.keymap`
+exporter**) is published at
+`https://cormoran.github.io/zmk-feature-fast-keymap/`.
 
 ## Module User Guide
 
-1. Add dependency to your `config/west.yml`. Note: this module requires a patched ZMK with custom Studio RPC support.
+1. Add the module to your `config/west.yml`.
+
+   > **Requirement:** this module reads the compiled-in default keymap via ZMK's
+   > `zmk_stock_keymap_get_layer_binding_at_idx()` accessor, which currently
+   > lives on the ZMK branch
+   > `pr/main+custom-studio-protocol/expose-stock-keymap`. Point your ZMK
+   > project at that branch until it merges into `main+custom-studio-protocol`.
 
    ```yml
    manifest:
-       remotes:
-           ...
-           - name: cormoran
-           url-base: https://github.com/cormoran
-       projects:
-           ...
-           - name: zmk-fast-keymap
-           remote: cormoran
-           revision: main+custom-studio-protocol # or latest commit hash
-           import: true
-           ...
-           # Required: patched ZMK with custom Studio RPC support
-           - name: zmk
-           remote: cormoran
-           revision: main+custom-studio-protocol
-           import:
-               file: app/west.yml
+     remotes:
+       - name: cormoran
+         url-base: https://github.com/cormoran
+     projects:
+       - name: zmk-feature-fast-keymap
+         remote: cormoran
+         revision: main
+       # Patched ZMK: custom Studio RPC + the stock-keymap accessor
+       - name: zmk
+         remote: cormoran
+         revision: pr/main+custom-studio-protocol/expose-stock-keymap
+         import:
+           file: app/west.yml
    ```
 
-2. Enable flags in your `config/<shield>.conf`
+2. Enable the flags in your `config/<shield>.conf`.
 
    ```conf
-   CONFIG_ZMK_FAST_KEYMAP=y
-
-   # Optionally enable custom Studio RPC
    CONFIG_ZMK_STUDIO=y
+   CONFIG_ZMK_FAST_KEYMAP=y
    CONFIG_ZMK_FAST_KEYMAP_STUDIO_RPC=y
-   CONFIG_ZMK_CUSTOM_SETTINGS=y
-   CONFIG_ZMK_CUSTOM_SETTINGS_STUDIO_RPC=y
+
+   # Recommended: the requests are tiny, but the default RX buffer (30 B) is
+   # smaller than the framed custom-subsystem request envelope.
    CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE=128
-   CONFIG_ZMK_LOW_PRIORITY_THREAD_STACK_SIZE=2048
    ```
 
-3. Implement your custom protocol by editing:
-   - `proto/cormoran/fast-keymap/fast_keymap.proto` — message types
-   - `src/studio/fast_keymap_handler.c` — firmware RPC handler
-   - `web/src/App.tsx` — web UI
+   `CONFIG_ZMK_FAST_KEYMAP_STUDIO_RPC` is `y` by default once `CONFIG_ZMK_STUDIO`
+   and `CONFIG_ZMK_FAST_KEYMAP` are set. Responses stream, so no TX-buffer
+   change is required.
+
+3. Flash, open the web app above, connect (USB or BLE), and it fast-loads your
+   keymap and behaviors. Use "Export .keymap" to copy a `.keymap`-style dump.
+
+### Limitations
+
+- Read-only: editing/saving stays with ZMK's official `keymap` subsystem. This
+  module coexists with it.
+- `.keymap` export renders binding parameters as raw numbers (e.g. `&kp 4`), not
+  keycode names — enough to reconstruct structure, not a pretty-printer.
+- Standard-behavior aliases/metadata are authoritative in the web bundle;
+  behaviors it doesn't bundle are fetched from the device on demand.
+
+### Protocol / contributor notes
+
+The fingerprint canonicalization and the definition-version bump procedure (the
+firmware↔web contract) are documented in [docs/protocol.md](./docs/protocol.md);
+`DESIGN.md` has the full rationale and API table.
 
 ### Web UI
 
@@ -72,9 +112,11 @@ See [web/README.md](./web/README.md) for web UI development instructions.
 
 ### Publishing Web UI
 
-**GitHub Pages**: Merge a pull request into `main+custom-studio-protocol` to deploy to `https://<account>.github.io/<repo>/`.
+**GitHub Pages**: Merge a pull request into `main` to deploy to
+`https://<account>.github.io/<repo>/`.
 
-**Cloudflare Workers (PR previews)**: Configure `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` secrets.
+**Cloudflare Workers (PR previews)**: Configure `CLOUDFLARE_API_TOKEN` and
+`CLOUDFLARE_ACCOUNT_ID` secrets.
 
 ## Module Development Guide
 

@@ -1,9 +1,10 @@
-# List of this module's dependencies
+# List of this module's dependencies.
+#
+# zmk-feature-fast-keymap is read-only and has no runtime module dependencies
+# of its own -- it needs only ZMK core (keymap + behaviors + Studio RPC), which
+# the consumer already imports. In particular it does NOT depend on
+# zmk-feature-custom-settings (nothing is persisted). See README for the one
+# requirement: the ZMK branch must expose
+# zmk_stock_keymap_get_layer_binding_at_idx().
 manifest:
-  remotes:
-    - name: zmkfirmware
-      url-base: https://github.com/zmkfirmware
-  projects:
-    - name: zmk-feature-custom-settings
-      url: https://github.com/cormoran/zmk-feature-custom-settings
-      revision: main
+  projects: []

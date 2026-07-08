@@ -42,8 +42,10 @@ function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <h1>🔧 zmk-fast-keymap</h1>
-        <p>Custom Studio RPC Demo</p>
+        <h1>⚡ zmk-fast-keymap</h1>
+        <p>
+          Fast, cache-friendly keymap &amp; behavior viewer / .keymap exporter
+        </p>
       </header>
 
       <ZMKConnection
@@ -117,7 +119,8 @@ function App() {
 
       <footer className="app-footer">
         <p>
-          <strong>zmk-fast-keymap</strong> - Customize this for your ZMK module
+          <strong>zmk-fast-keymap</strong> — read-only ZMK Studio keymap loader
+          &amp; exporter
         </p>
         <p>
           <a
