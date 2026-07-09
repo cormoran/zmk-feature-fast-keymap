@@ -46,16 +46,16 @@ Groups reported in `Snapshot`:
 
 | field | canonicalization |
 |-------|------------------|
-| `behaviors_fp` | per behavior, ascending `local_id`: `u16le local_id` + metadata bytes + `str16 alias` + `str16 display_name` |
-| `metadata_fp` (per behavior, in `BehaviorSummary`/`GetBehaviorDetailsResponse`) | the metadata bytes above |
+| `def_fp` (per behavior; the identity + validator) | metadata bytes + `str16 alias` + `str16 display_name`, using the **as-served** strings (alias = first DT node label, else device name; display_name = metadata display name, else device name). Keys the web's standard-behavior bundle and per-device cache. |
+| `behaviors_fp` | per behavior, ascending `local_id`: `u16le local_id` + that behavior's `def_fp`-preimage (metadata bytes + `str16 alias` + `str16 display_name`, as-served) |
 | `default_keymap_fp` | per layer (index order): `u8 layer_id` + each binding_idx's canonical binding (stock/default) |
 | `keymap_fp` | `u8 active_layout_index`, then per layer: `u8 layer_id` + `str16 name` + each binding_idx's canonical binding (current) |
 | `LayerFingerprint.fp` / `.default_fp` (per layer) | that layer's canonical bindings concatenated (current / default); no `layer_id` prefix — the message carries `id` separately |
 | `physical_layout_fp` | `u8 active_layout_index`, then per layout: `str16 name` + `u16le key_count` + per key `i16le width,height,x,y,r,rx,ry` (rotation fields `0` when `CONFIG_ZMK_PHYSICAL_LAYOUT_KEY_ROTATION` is off) |
 
-> Note the two string encodings: alias/display_name in `behaviors_fp` use
-> `str16`, but value display-names **inside metadata** use `str8`. Keep both
-> sides in sync.
+> Note the two string encodings: alias/display_name (in `def_fp` /
+> `behaviors_fp`) use `str16`, but value display-names **inside metadata** use
+> `str8`. Keep both sides in sync.
 
 ## `FK_DEFINITION_VERSION`
 
@@ -66,7 +66,9 @@ A single integer defined in **both** `src/fingerprint.h` (C) and
 2. the web app's bundled standard-behavior metadata (`STANDARD_BEHAVIORS`).
 
 The web client only trusts a bundled definition (skipping a device fetch) when
-its `FK_DEFINITION_VERSION` matches and the per-behavior `metadata_fp` matches.
+its `FK_DEFINITION_VERSION` matches and the behavior's `def_fp` matches a
+bundle entry (the web indexes `STANDARD_BEHAVIORS` by locally-computed
+`def_fp`).
 
 ### When to bump it
 
@@ -86,6 +88,7 @@ mismatched version just makes clients fall back to fetching from the device
 Some standard-behavior metadata depends on the consumer's ZMK Kconfig (HID
 keyboard/consumer max usage under NKRO/HKRO and consumer basic/full; Bluetooth
 profile count via `CONFIG_BT_MAX_PAIRED`). The web bundle can't know these, so
-it uses documented defaults (see `web/src/standardBehaviors.ts`). A board with
-different Kconfig simply causes one extra `get_behavior_details` fetch for the
-affected behavior (`kp`/`kt`/`mt`/`lt`/`sk`/`bt`) — never wrong data.
+it uses documented defaults (see the web package's `standardBehaviors.ts`). On
+a board with different Kconfig the affected behavior's `def_fp` won't match the
+bundle, so it funnels into the `get_behaviors` batch fetch (`kp`/`kt`/`mt`/
+`lt`/`sk`/`bt`) — one extra round-trip, never wrong data.

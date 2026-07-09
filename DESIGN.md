@@ -158,22 +158,35 @@ bindings = microseconds), no persistence.
 
 Canonicalization must be **identical in firmware and in the web bundle** for
 the groups the web reproduces locally (`behaviors_fp` and per-behavior
-`metadata_fp`). Freeze the exact byte layout here and bump
-`FK_DEFINITION_VERSION` on any change.
+`def_fp`). Freeze the exact byte layout here and bump `FK_DEFINITION_VERSION`
+on any change.
 
 Canonical binding bytes (used by the keymap fps): `i32 behavior_local_id`
 (LE; `-1` when `behavior_dev == NULL`), `u32 param1` (LE), `u32 param2` (LE).
 
+Canonical **string** bytes: `str16` = `u16 length` (LE) + raw UTF-8 bytes.
+Behavior alias/display_name always use the **as-served** strings (the exact
+strings the RPC returns: alias = first DT node label, falling back to the
+device name when the node has no label; display_name = metadata display name,
+falling back to the device name) — so the web can recompute a behavior's fp
+from a details response.
+
 Groups:
 
+- **`def_fp`** (per behavior, the identity + validator; §5) — over the
+  behavior's canonical metadata bytes (§5) + `str16 alias` + `str16
+  display_name` (as-served). Because it covers metadata AND the strings, a
+  `def_fp` match proves the client's bundled/cached copy is byte-identical to
+  what the device serves, and it uniquely distinguishes behaviors that share
+  metadata (`mo`/`tog`/`to`/`sl`). The web keys its standard-behavior bundle
+  (and its per-device cache) by `def_fp` — no `alias` needs to ride the wire.
+  (Replaces the old per-behavior `metadata_fp`, which could not detect a
+  renamed alias and could not identify which behavior a shared metadata hash
+  belonged to.)
 - **`behaviors_fp`** — over all behaviors in ascending `local_id` order; for
-  each append `u16 local_id`, then the behavior's canonical metadata bytes
-  (§5), then `alias` bytes, then `display_name` bytes. Changes if any behavior,
-  its metadata, alias, or name changes. Primary cache key: a match lets the
-  client skip the entire behavior fetch (list + all metadata).
-- **`metadata_fp`** (per behavior) — over the canonical metadata bytes (§5).
-  The web bundle stores each standard behavior's expected `metadata_fp` (keyed
-  by alias); a match means "use my bundled copy, don't fetch details."
+  each append `u16 local_id`, then that behavior's `def_fp`-preimage bytes
+  (metadata + `str16 alias` + `str16 display_name`, as-served). Whole-set cache
+  key: a match lets the client skip the entire behavior fetch.
 - **`default_keymap_fp`** — over every layer (index order): `u8 layer_id` then,
   for each `binding_idx` in `0..binding_count`, the canonical binding bytes of
   `zmk_stock_keymap_get_layer_binding_at_idx(...)`. Changes only on reflash.
@@ -185,16 +198,41 @@ Groups:
 - **`physical_layout_fp`** — over the canonical layouts bytes (active index,
   then per layout: name + per-key `i16 width,height,x,y,r,rx,ry`).
 
-## 5. Behavior metadata (official-style messages + canonical fp bytes)
+## 5. Behaviors: slim list + on-demand details (minimize redundant transport)
 
-`get_behavior_details` returns the **official** metadata tree
-(`repeated BehaviorBindingParametersSet` of
+`list_behaviors` returns one `BehaviorSummary { local_id, def_fp, details }`
+per behavior. On the wire the summary is normally just `local_id + def_fp`
+(~10 B) — proto3 omits the empty `details` submessage for free. The client
+resolves each behavior's alias/display_name/metadata **locally** by `def_fp`
+(§4): from its versioned standard-behavior **bundle** or its **per-device
+cache**; only genuine misses are transferred. `local_id` is per-device
+(SETTINGS_TABLE), so it keys the per-device cache only — the portable identity
+is `def_fp`.
+
+`details` is a `BehaviorDetails { display_name, alias, metadata }` where
+`metadata` is the **official** tree (`repeated BehaviorBindingParametersSet` of
 `BehaviorParameterValueDescription`, callback-encoded — copy the official
-encoder), plus our extension fields `alias` and `metadata_fp`.
+encoder). It carries no fingerprint; the client recomputes `def_fp` from the
+served fields (guaranteeing both sides agree on the canonicalization).
 
-For `metadata_fp` (§4) the firmware and the web bundle both hash this canonical
-serialization of the SAME metadata (freeze it, version by
-`FK_DEFINITION_VERSION`):
+`list_behaviors` takes a `BehaviorDetailsMode`:
+
+- `NONE` — slim summaries only (warm-ish: the client has a per-device cache).
+- `CUSTOM` — inline `details` for **non-standard** behaviors only (the cold
+  path; the client fills standard behaviors from its bundle). "Standard" =
+  `fk_behavior_is_standard()` (the firmware builtin classification, §2.1).
+- `ALL` — inline `details` for everything (bundle untrusted, e.g. a
+  `FK_DEFINITION_VERSION` mismatch).
+
+Miss-repair batch: `get_behaviors { repeated behavior_ids }` →
+`repeated BehaviorEntry { id, details }` fetches exactly the unresolved
+behaviors in **one** round-trip (bundle gaps, Kconfig-variant `def_fp` misses
+for `kp`/`mt`/`lt`/`sk`/`bt`, stale caches). The request must fit
+`CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE=128`, so `behavior_ids` is a bounded
+`max_count` array (≤32) and the client chunks at 32.
+
+The metadata canonical bytes (input to `def_fp`, §4) — freeze, versioned by
+`FK_DEFINITION_VERSION`:
 
 ```
 u8  num_sets
@@ -207,8 +245,10 @@ repeat num_sets:
     u8  name_len ; name bytes (value display_name, may be empty)
 ```
 
-(Standard behaviors are normally resolved from the bundle and never fetched;
-only custom/unbundled behaviors hit `get_behavior_details`.)
+The web bundle must cover **all** firmware-"standard" behaviors so `CUSTOM`
+actually reaches the device in one round-trip (an unbundled-but-standard
+behavior would otherwise need a `get_behaviors` follow-up). Expanding the
+bundle is web-only and additive (no version bump).
 
 ## 6. Physical layouts
 
@@ -228,8 +268,8 @@ For any `has_<sub>` submessage field you assign, set `has_<sub>=true`.
 ```
 Request.oneof:
   bool                              get_snapshot           = 1
-  bool                              list_behaviors         = 2
-  GetBehaviorDetailsRequest{u32 behavior_id}               = 3
+  ListBehaviorsRequest              list_behaviors         = 2
+  GetBehaviorsRequest               get_behaviors          = 3   // batch details
   GetLayerRequest{u32 layer_id}     get_layer              = 4   // current/effective
   GetLayerRequest{u32 layer_id}     get_default_layer      = 5   // DT stock default
   GetLayerRequest{u32 layer_id}     get_edited_layer       = 6   // diff current vs default
@@ -239,7 +279,7 @@ Response.oneof:
   ErrorResponse{ErrorCode code}     error                  = 1
   Snapshot                          snapshot               = 2
   ListBehaviorsResponse             list_behaviors         = 3
-  GetBehaviorDetailsResponse        get_behavior_details   = 4
+  GetBehaviorsResponse              get_behaviors          = 4
   Layer                             get_layer              = 5
   Layer                             get_default_layer      = 6
   EditedLayer                       get_edited_layer       = 7
@@ -253,14 +293,25 @@ Snapshot:
 LayerFingerprint:
   u32 id; string name; u32 binding_count; u32 fp; u32 default_fp; u32 edited_count
 
+enum BehaviorDetailsMode: NONE = 0; CUSTOM = 1; ALL = 2   // §5
+ListBehaviorsRequest:
+  BehaviorDetailsMode details
 ListBehaviorsResponse:
   repeated BehaviorSummary behaviors          // callback-encoded
-BehaviorSummary:
-  u32 local_id; string alias; string display_name; u32 metadata_fp; bool standard
+BehaviorSummary:                              // slim: normally just local_id + def_fp
+  u32 local_id; u32 def_fp; BehaviorDetails details   // details present only per mode (§5)
 
-// official shape + our alias/metadata_fp extensions
-GetBehaviorDetailsResponse:
-  u32 id; string display_name; string alias; u32 metadata_fp;
+// batch miss-repair (§5)
+GetBehaviorsRequest:
+  repeated u32 behavior_ids                   // .options max_count:32 (fits RX buf)
+GetBehaviorsResponse:
+  repeated BehaviorEntry behaviors            // callback-encoded
+BehaviorEntry:
+  u32 id; BehaviorDetails details
+
+// official details tree factored into a submessage (no fingerprint on the wire)
+BehaviorDetails:
+  string display_name; string alias;
   repeated BehaviorBindingParametersSet metadata
 BehaviorBindingParametersSet / BehaviorParameterValueDescription /
   BehaviorParameterValueDescriptionRange / BehaviorParameterHidUsage /
