@@ -51,7 +51,8 @@ Groups reported in `Snapshot`:
 | `default_keymap_fp` | per layer (index order): `u8 layer_id` + each binding_idx's canonical binding (stock/default) |
 | `keymap_fp` | `u8 active_layout_index`, then per layer: `u8 layer_id` + `str16 name` + each binding_idx's canonical binding (current) |
 | `LayerFingerprint.fp` / `.default_fp` (per layer) | that layer's canonical bindings concatenated (current / default); no `layer_id` prefix — the message carries `id` separately |
-| `physical_layout_fp` | `u8 active_layout_index`, then per layout: `str16 name` + `u16le key_count` + per key `i16le width,height,x,y,r,rx,ry` (rotation fields `0` when `CONFIG_ZMK_PHYSICAL_LAYOUT_KEY_ROTATION` is off) |
+| per-layout physical `fp` (in `PhysicalLayoutSummary`) | one layout: `str16 name` + `u16le key_count` + per key `i16le width,height,x,y,r,rx,ry` (rotation fields `0` when `CONFIG_ZMK_PHYSICAL_LAYOUT_KEY_ROTATION` is off). **Device-opaque** — the web caches+compares it, never recomputes it. |
+| `physical_layout_fp` | `u8 active_layout_index`, then per layout that layout's per-layout-`fp`-preimage (name + keys, as above) |
 
 > Note the two string encodings: alias/display_name (in `def_fp` /
 > `behaviors_fp`) use `str16`, but value display-names **inside metadata** use

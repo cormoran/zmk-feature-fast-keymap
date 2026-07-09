@@ -195,8 +195,12 @@ Groups:
   layers whose `fp` changed.
 - **`keymap_fp`** — over all layers' current bindings + layer names + active
   physical-layout index. One "did anything in the keymap change" key.
-- **`physical_layout_fp`** — over the canonical layouts bytes (active index,
-  then per layout: name + per-key `i16 width,height,x,y,r,rx,ry`).
+- **per-layout physical `fp`** (in `PhysicalLayoutSummary`) — over one layout's
+  `str16 name` + `u16 key_count` + per key `i16 width,height,x,y,r,rx,ry`.
+  Device-opaque (the web caches+compares it, never recomputes it).
+- **`physical_layout_fp`** — over `u8 active_layout_index` then, per layout, that
+  layout's per-layout-`fp`-preimage bytes (name + keys, as above). Whole-set
+  skip key.
 
 ## 5. Behaviors: slim list + on-demand details (minimize redundant transport)
 
@@ -250,11 +254,36 @@ actually reaches the device in one round-trip (an unbundled-but-standard
 behavior would otherwise need a `get_behaviors` follow-up). Expanding the
 bundle is web-only and additive (no version bump).
 
-## 6. Physical layouts
+## 6. Physical layouts (slim summary + on-demand geometry)
 
-Secondary (geometry for export). Return the **official** `PhysicalLayouts`
-message (callback-encoded, copy the official encoder). Gate refetch by
-`physical_layout_fp` (§4).
+Layout key geometry is bulky (~14 B/key × keys × layouts) and usually unneeded
+(a keymap viewer mostly wants the layout **names** + which is active). So mirror
+the behaviors pattern — fetch a slim summary, pull geometry only when needed:
+
+- `get_physical_layouts { LayoutDetailsMode details }` (`NONE`/`ALL`) →
+  `PhysicalLayoutsResponse { active_layout_index, repeated PhysicalLayoutSummary
+  layouts }`, `PhysicalLayoutSummary { name, fp, [keys] }`. In `NONE` (default)
+  each summary is just `name + fp` (the geometry `keys` are omitted → free under
+  proto3). `ALL` inlines every layout's `keys` (one-shot convenience).
+- `get_physical_layout { layout_index }` →
+  `PhysicalLayoutResponse { index, PhysicalLayoutSummary layout }` with `keys`
+  populated — a single layout's geometry on demand.
+- Per-layout `fp` = crc32 over that layout's `str16 name` + `u16 key_count` +
+  per key `i16 width,height,x,y,r,rx,ry` (§4). It is **device-opaque** to the
+  web (the web never recomputes it — it just caches the device-reported value
+  and compares), so it needs no web-reproduction contract, unlike `def_fp`.
+- `active_layout_index` and the whole-set `physical_layout_fp` are already in
+  the Snapshot; `physical_layout_fp` still lets the client skip layouts
+  entirely when nothing changed.
+
+Web flow (DESIGN §9 "C"): whole `physical_layout_fp` hit ⇒ use cache. Else
+`get_physical_layouts(NONE)` for the summary, compare each layout's `fp` to the
+per-layout cache, and `get_physical_layout(index)` (default: the active layout;
+others lazily, when a consumer needs their geometry). Cache each layout's
+`{name, fp, keys?}` by `fp`.
+
+`KeyPhysicalAttrs` and the per-key encoder are unchanged (copy the official
+encoder for the geometry); only the request/response framing changes.
 
 ## 7. RPC API (proto — adjust field numbers to satisfy nanopb)
 
@@ -273,7 +302,8 @@ Request.oneof:
   GetLayerRequest{u32 layer_id}     get_layer              = 4   // current/effective
   GetLayerRequest{u32 layer_id}     get_default_layer      = 5   // DT stock default
   GetLayerRequest{u32 layer_id}     get_edited_layer       = 6   // diff current vs default
-  bool                              get_physical_layouts   = 7
+  GetPhysicalLayoutsRequest         get_physical_layouts   = 7   // slim summary (+ optional geometry)
+  GetPhysicalLayoutRequest          get_physical_layout    = 8   // one layout's geometry
 
 Response.oneof:
   ErrorResponse{ErrorCode code}     error                  = 1
@@ -283,7 +313,8 @@ Response.oneof:
   Layer                             get_layer              = 5
   Layer                             get_default_layer      = 6
   EditedLayer                       get_edited_layer       = 7
-  PhysicalLayouts                   get_physical_layouts   = 8
+  PhysicalLayoutsResponse           get_physical_layouts   = 8
+  PhysicalLayoutResponse            get_physical_layout    = 9
 
 Snapshot:
   u32 definition_version, behaviors_fp, default_keymap_fp, keymap_fp,
@@ -323,13 +354,17 @@ Layer:            u32 id; string name; repeated BehaviorBinding bindings
 EditedBinding:    u32 position; BehaviorBinding binding
 EditedLayer:      u32 id; repeated EditedBinding bindings
 
-// official shape
-PhysicalLayouts:  u32 active_layout_index; repeated PhysicalLayout layouts
-PhysicalLayout:   string name; repeated KeyPhysicalAttrs keys
-KeyPhysicalAttrs: sint32 width,height,x,y,r,rx,ry
+// physical layouts: slim summary + on-demand geometry (§6)
+enum LayoutDetailsMode: NONE = 0; ALL = 1
+GetPhysicalLayoutsRequest:  LayoutDetailsMode details
+GetPhysicalLayoutRequest:   u32 layout_index
+PhysicalLayoutsResponse:    u32 active_layout_index; repeated PhysicalLayoutSummary layouts
+PhysicalLayoutResponse:     u32 index; PhysicalLayoutSummary layout   // keys populated
+PhysicalLayoutSummary:      string name; u32 fp; repeated KeyPhysicalAttrs keys  // keys only in ALL / single fetch
+KeyPhysicalAttrs:           sint32 width,height,x,y,r,rx,ry
 
 ErrorResponse:    ErrorCode code
-ErrorCode enum:   ERR_GENERIC=0; ERR_INVALID_LAYER=1; ERR_INVALID_BEHAVIOR=2
+ErrorCode enum:   ERR_GENERIC=0; ERR_INVALID_LAYER=1; ERR_INVALID_BEHAVIOR=2; ERR_INVALID_LAYOUT=3
 ```
 
 `behavior_id` in `BehaviorBinding` follows the official convention (the
@@ -338,6 +373,8 @@ missing binding). Invalid `layer_id`/`behavior_id` → `ErrorResponse` with the
 specific `ErrorCode`. `get_edited_layer`/`get_default_layer` and the
 `default_fp`/`edited_count` fields degrade gracefully when
 `CONFIG_ZMK_KEYMAP_SETTINGS_STORAGE` is off (default == current; see §2).
+`get_physical_layout` with an out-of-range `layout_index` → `ErrorResponse
+ERR_INVALID_LAYOUT`.
 
 ## 8. Config / buffers
 
