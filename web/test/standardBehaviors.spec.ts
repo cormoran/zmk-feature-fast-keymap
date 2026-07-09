@@ -3,7 +3,7 @@ import {
   bundledMetadataFp,
   crc32Update,
   metadataFp,
-} from "../src/standardBehaviors";
+} from "zmk-feature-fast-keymap";
 
 describe("crc32Update", () => {
   it("matches the standard CRC-32/ISO-HDLC check value for '123456789'", () => {

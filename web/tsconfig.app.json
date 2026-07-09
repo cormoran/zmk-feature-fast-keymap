@@ -16,6 +16,15 @@
     "noEmit": true,
     "jsx": "react-jsx",
 
+    // Resolve the fast-keymap workspace package to its TS source (not a
+    // prebuilt `dist`), matching vite.config.ts's resolve.alias and
+    // jest.config.ts's moduleNameMapper -- keeps `tsc -b` from depending on
+    // the package having been built first.
+    "baseUrl": ".",
+    "paths": {
+      "zmk-feature-fast-keymap": ["./packages/fast-keymap/src/index.ts"]
+    },
+
     /* Linting */
     "strict": true,
     "noUnusedLocals": true,

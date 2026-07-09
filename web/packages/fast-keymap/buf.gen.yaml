@@ -1,6 +1,6 @@
 version: v2
 inputs:
-  - directory: ../proto
+  - directory: ../../../proto
 plugins:
   - local: protoc-gen-ts_proto
     opt:
@@ -10,7 +10,7 @@ plugins:
       - useExactTypes=false
       - esModuleInterop=true
       # This module's proto (ErrorCode) has an enum. ts-proto's default
-      # `export enum` output fails tsconfig.app.json's erasableSyntaxOnly
+      # `export enum` output fails tsconfig.build.json's erasableSyntaxOnly
       # (TS1294): enum declarations are not erasable syntax. enumsAsLiterals
       # emits an `as const` object + type alias instead, which is (same fix
       # as zmk-feature-watchdog/os-detection/kscan-diagnostics/etc.).

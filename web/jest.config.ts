@@ -17,6 +17,11 @@ const config: Config = {
       "<rootDir>/node_modules/@cormoran/zmk-studio-react-hook/lib/testing/index.js",
     "^@cormoran/zmk-studio-react-hook$":
       "<rootDir>/node_modules/@cormoran/zmk-studio-react-hook/lib/index.js",
+    // Resolve the fast-keymap package to its TS source (not `dist`) so
+    // ts-jest transpiles it directly -- avoids both the
+    // transformIgnorePatterns node_modules skip below and any build-order
+    // coupling between the package and the app during `npm test`.
+    "^zmk-feature-fast-keymap$": "<rootDir>/packages/fast-keymap/src/index.ts",
     // Mock CSS imports
     "\\.(css|less|scss|sass)$": "identity-obj-proxy",
   },

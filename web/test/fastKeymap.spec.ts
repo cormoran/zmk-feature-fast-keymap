@@ -2,20 +2,16 @@ import {
   exportKeymapText,
   FastKeymapCacheKeys,
   loadFastKeymap,
-  type FastKeymapCall,
-} from "../src/fastKeymap";
-import {
   FK_DEFINITION_VERSION,
   bundledMetadataFp,
-} from "../src/standardBehaviors";
-import type {
-  BehaviorSummary,
-  EditedBinding,
-  GetBehaviorDetailsResponse,
-  PhysicalLayouts,
-  Request,
-  Snapshot,
-} from "../src/proto/cormoran/fast-keymap/fast_keymap";
+  type FastKeymapCall,
+  type BehaviorSummary,
+  type EditedBinding,
+  type GetBehaviorDetailsResponse,
+  type PhysicalLayouts,
+  type Request,
+  type Snapshot,
+} from "zmk-feature-fast-keymap";
 
 // -- fixture: a 2-behavior (1 bundled/kp, 1 custom), 2-layer device --------
 //

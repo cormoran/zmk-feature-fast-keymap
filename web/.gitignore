@@ -23,7 +23,7 @@ dist-ssr
 *.sln
 *.sw?
 
-src/proto/**/*.ts
+packages/fast-keymap/src/proto/**/*.ts
 
 # Test coverage
 coverage

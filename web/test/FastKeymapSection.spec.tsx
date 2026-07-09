@@ -8,12 +8,10 @@ import { FastKeymapSection, SUBSYSTEM_IDENTIFIER } from "../src/App";
 import {
   Request,
   Response,
-  type Snapshot,
-} from "../src/proto/cormoran/fast-keymap/fast_keymap";
-import {
   FK_DEFINITION_VERSION,
   bundledMetadataFp,
-} from "../src/standardBehaviors";
+  type Snapshot,
+} from "zmk-feature-fast-keymap";
 import { LockState } from "@zmkfirmware/zmk-studio-ts-client/core";
 
 // Mock the ZMK client so we can control call_rpc responses directly: both
@@ -307,8 +305,7 @@ describe("FastKeymapSection", () => {
       });
 
       let coreCallback:
-        | ((notification: { lockStateChanged?: LockState }) => void)
-        | undefined;
+        ((notification: { lockStateChanged?: LockState }) => void) | undefined;
       const mockZMKApp = createConnectedMockZMKApp({
         subsystems: [SUBSYSTEM_IDENTIFIER],
       });

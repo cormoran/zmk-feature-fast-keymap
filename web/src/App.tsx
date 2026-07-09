@@ -11,8 +11,9 @@ import {
   useCustomSubsystem,
   connectSerial,
 } from "@cormoran/zmk-studio-react-hook";
-import { Request, Response } from "./proto/cormoran/fast-keymap/fast_keymap";
 import {
+  Request,
+  Response,
   exportKeymapText,
   formatBindingToken,
   indexBehaviorsById,
@@ -20,7 +21,7 @@ import {
   type FastKeymapBehavior,
   type FastKeymapLayer,
   type FastKeymapModel,
-} from "./fastKeymap";
+} from "zmk-feature-fast-keymap";
 
 export const SUBSYSTEM_IDENTIFIER = "cormoran__fast_keymap";
 
