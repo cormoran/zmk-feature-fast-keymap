@@ -10,10 +10,12 @@
 import {
   BehaviorDetailsMode,
   ErrorCode,
+  LayoutDetailsMode,
   type BehaviorBindingParametersSet,
   type BehaviorDetails,
   type BehaviorSummary,
   type EditedBinding,
+  type KeyPhysicalAttrs,
   type Request,
   type Response,
   type Snapshot,
@@ -82,7 +84,15 @@ export interface FastKeymapLayoutKey {
 
 export interface FastKeymapLayout {
   name: string;
-  keys: FastKeymapLayoutKey[];
+  /** Device-opaque per-layout fingerprint (DESIGN.md SS4/SS6) -- the web
+   * never recomputes this, it only caches and compares the device-reported
+   * value (unlike a behavior's def_fp). */
+  fp: number;
+  /** Undefined until this layout's geometry has actually been fetched.
+   * loadFastKeymap() always resolves the *active* layout's keys (from cache
+   * or a `get_physical_layout` fetch); other layouts' keys stay undefined
+   * until a consumer calls loadPhysicalLayoutGeometry() for them. */
+  keys?: FastKeymapLayoutKey[];
 }
 
 export interface FastKeymapLoadStats {
@@ -159,6 +169,13 @@ export const FastKeymapCacheKeys = {
   },
   layouts(deviceKey: string): string {
     return `${FastKeymapCacheKeys.prefix(deviceKey)}:layouts`;
+  },
+  /** Per-layout geometry cache (DESIGN.md SS6): keyed by that one layout's
+   * own device-opaque `fp`, independent of the whole-set `layouts()` key
+   * above -- lets a single changed/added layout skip fetching every other
+   * layout's already-known geometry. */
+  layoutGeometry(deviceKey: string, fp: number): string {
+    return `${FastKeymapCacheKeys.prefix(deviceKey)}:layoutGeometry:${fp}`;
   },
 };
 
@@ -632,12 +649,136 @@ async function loadLayers(
   return { layers, fromCacheCount, fetchedFullCount, fetchedDiffCount };
 }
 
-// -- physical layouts -------------------------------------------------------
+// -- physical layouts (slim summary + on-demand geometry, DESIGN.md SS6) ---
+//
+// get_physical_layouts(NONE) returns just {name, fp} per layout (no `keys`,
+// omitted for free by proto3) -- geometry is pulled in separately via
+// get_physical_layout(index), eagerly for the active layout (loadFastKeymap
+// always wants to render it) and lazily for the rest (via the exported
+// loadPhysicalLayoutGeometry() helper, for a consumer that wants to show a
+// non-active layout on demand).
+//
+// Two cache layers, both keyed by fingerprint:
+// - the whole-set cache (FastKeymapCacheKeys.layouts) -- keyed by the
+//   Snapshot's physical_layout_fp, exactly like before: a match skips every
+//   layout RPC.
+// - a per-layout geometry cache (FastKeymapCacheKeys.layoutGeometry) --
+//   keyed by that one layout's own device-opaque `fp`, so a single
+//   changed/added layout doesn't cost every other layout's cached geometry
+//   (mirrors the behaviors resolution ladder in DESIGN.md SS5).
 
 interface SerializedLayouts {
   fp: number;
   activeLayoutIndex: number;
   layouts: FastKeymapLayout[];
+}
+
+/** Guards against an old-shaped cache entry (pre-summary protocol: every
+ * layout always carried `keys`, none carried a per-layout `fp`) -- treat it
+ * exactly like a miss rather than crashing on it or trusting stale/missing
+ * fingerprints. */
+function isSerializedLayoutsCache(value: unknown): value is SerializedLayouts {
+  if (!value || typeof value !== "object") return false;
+  const v = value as Partial<SerializedLayouts>;
+  return (
+    typeof v.fp === "number" &&
+    typeof v.activeLayoutIndex === "number" &&
+    Array.isArray(v.layouts) &&
+    v.layouts.every(
+      (l) =>
+        l &&
+        typeof l === "object" &&
+        typeof (l as Partial<FastKeymapLayout>).name === "string" &&
+        typeof (l as Partial<FastKeymapLayout>).fp === "number"
+    )
+  );
+}
+
+interface SerializedLayoutGeometry {
+  name: string;
+  fp: number;
+  keys: FastKeymapLayoutKey[];
+}
+
+function isSerializedLayoutGeometry(
+  value: unknown
+): value is SerializedLayoutGeometry {
+  if (!value || typeof value !== "object") return false;
+  const l = value as Partial<SerializedLayoutGeometry>;
+  return (
+    typeof l.name === "string" &&
+    typeof l.fp === "number" &&
+    Array.isArray(l.keys)
+  );
+}
+
+function toLayoutKeys(keys: KeyPhysicalAttrs[]): FastKeymapLayoutKey[] {
+  return keys.map((k) => ({
+    width: k.width,
+    height: k.height,
+    x: k.x,
+    y: k.y,
+    r: k.r,
+    rx: k.rx,
+    ry: k.ry,
+  }));
+}
+
+function readLayoutGeometryCache(
+  storage: Storage | undefined,
+  deviceKey: string,
+  fp: number
+): SerializedLayoutGeometry | undefined {
+  const raw = readCache<unknown>(
+    storage,
+    FastKeymapCacheKeys.layoutGeometry(deviceKey, fp)
+  );
+  return isSerializedLayoutGeometry(raw) ? raw : undefined;
+}
+
+function writeLayoutGeometryCache(
+  storage: Storage | undefined,
+  deviceKey: string,
+  entry: SerializedLayoutGeometry
+): void {
+  writeCache(
+    storage,
+    FastKeymapCacheKeys.layoutGeometry(deviceKey, entry.fp),
+    entry
+  );
+}
+
+/**
+ * Fetches one layout's geometry on demand via `get_physical_layout`, caches
+ * it (keyed by that layout's own `fp`, like every per-layout geometry cache
+ * entry), and returns the keys. Exported so a consuming app can lazily load
+ * a non-active layout's geometry (e.g. when the user picks a different
+ * layout to view) without loadFastKeymap() having to fetch every layout's
+ * geometry up front.
+ */
+export async function loadPhysicalLayoutGeometry(
+  call: FastKeymapCall,
+  index: number,
+  options: LoadFastKeymapOptions = {}
+): Promise<FastKeymapLayoutKey[]> {
+  const storage = options.storage ?? defaultStorage();
+  const deviceKey = options.deviceKey ?? "default-device";
+
+  const response = await callChecked(call, {
+    getPhysicalLayout: { layoutIndex: index },
+  });
+  const layout = response.getPhysicalLayout?.layout;
+  if (!layout) {
+    throw new Error(`get_physical_layout(${index}): device returned no layout`);
+  }
+
+  const keys = toLayoutKeys(layout.keys);
+  writeLayoutGeometryCache(storage, deviceKey, {
+    name: layout.name,
+    fp: layout.fp,
+    keys,
+  });
+  return keys;
 }
 
 async function loadPhysicalLayouts(
@@ -651,8 +792,12 @@ async function loadPhysicalLayouts(
   fromCache: boolean;
 }> {
   const cacheKey = FastKeymapCacheKeys.layouts(deviceKey);
-  const cached = readCache<SerializedLayouts>(storage, cacheKey);
+  const cachedRaw = readCache<unknown>(storage, cacheKey);
+  const cached = isSerializedLayoutsCache(cachedRaw) ? cachedRaw : undefined;
 
+  // Whole-set fast path: physical_layout_fp matches the last load's -> every
+  // layout (name + fp + whatever geometry was cached) is still exactly as
+  // served, skip get_physical_layouts entirely.
   if (cached && cached.fp === snapshot.physicalLayoutFp) {
     return {
       layouts: cached.layouts,
@@ -661,22 +806,52 @@ async function loadPhysicalLayouts(
     };
   }
 
-  const response = await callChecked(call, { getPhysicalLayouts: true });
+  const response = await callChecked(call, {
+    getPhysicalLayouts: { details: LayoutDetailsMode.LAYOUT_DETAILS_NONE },
+  });
   const data = response.getPhysicalLayouts;
-  const layouts: FastKeymapLayout[] = (data?.layouts ?? []).map((l) => ({
-    name: l.name,
-    keys: l.keys.map((k) => ({
-      width: k.width,
-      height: k.height,
-      x: k.x,
-      y: k.y,
-      r: k.r,
-      rx: k.rx,
-      ry: k.ry,
-    })),
-  }));
+  const summaries = data?.layouts ?? [];
   const activeLayoutIndex =
     data?.activeLayoutIndex ?? snapshot.activeLayoutIndex;
+
+  // Per-layout geometry cache lookup (independent of the whole-set match
+  // above) -- a layout whose fp didn't change keeps its cached geometry
+  // without a device round-trip.
+  const layouts: FastKeymapLayout[] = summaries.map((summary) => {
+    const cachedGeometry = readLayoutGeometryCache(
+      storage,
+      deviceKey,
+      summary.fp
+    );
+    return {
+      name: summary.name,
+      fp: summary.fp,
+      keys: cachedGeometry?.keys,
+    };
+  });
+
+  // Only the active layout's geometry is fetched eagerly here -- other
+  // layouts' geometry is left undefined for the caller to fetch lazily via
+  // loadPhysicalLayoutGeometry() (DESIGN.md SS6 / the web flow it
+  // describes).
+  const activeLayout = layouts[activeLayoutIndex];
+  if (activeLayout && activeLayout.keys === undefined) {
+    const activeResponse = await callChecked(call, {
+      getPhysicalLayout: { layoutIndex: activeLayoutIndex },
+    });
+    const activeData = activeResponse.getPhysicalLayout?.layout;
+    if (activeData) {
+      const keys = toLayoutKeys(activeData.keys);
+      activeLayout.name = activeData.name;
+      activeLayout.fp = activeData.fp;
+      activeLayout.keys = keys;
+      writeLayoutGeometryCache(storage, deviceKey, {
+        name: activeData.name,
+        fp: activeData.fp,
+        keys,
+      });
+    }
+  }
 
   writeCache(storage, cacheKey, {
     fp: snapshot.physicalLayoutFp,

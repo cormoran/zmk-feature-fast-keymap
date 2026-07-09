@@ -99,7 +99,15 @@ function buildResponse(request: Request): Response {
     return {
       getPhysicalLayouts: {
         activeLayoutIndex: 0,
-        layouts: [{ name: "Default", keys: [] }],
+        layouts: [{ name: "Default", fp: 20, keys: [] }],
+      },
+    };
+  }
+  if (request.getPhysicalLayout) {
+    return {
+      getPhysicalLayout: {
+        index: request.getPhysicalLayout.layoutIndex,
+        layout: { name: "Default", fp: 20, keys: [] },
       },
     };
   }

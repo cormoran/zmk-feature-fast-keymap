@@ -1,8 +1,10 @@
 import {
   BehaviorDetailsMode,
+  LayoutDetailsMode,
   exportKeymapText,
   FastKeymapCacheKeys,
   loadFastKeymap,
+  loadPhysicalLayoutGeometry,
   FK_DEFINITION_VERSION,
   STANDARD_BEHAVIORS,
   defFp,
@@ -10,7 +12,7 @@ import {
   type BehaviorSummary,
   type EditedBinding,
   type FastKeymapCall,
-  type PhysicalLayouts,
+  type PhysicalLayoutsResponse,
   type Request,
   type Snapshot,
 } from "zmk-feature-fast-keymap";
@@ -94,14 +96,41 @@ const FN_EFFECTIVE_BINDINGS = [
   { behaviorId: 2, param1: 9, param2: 0 },
 ];
 
-const LAYOUTS: PhysicalLayouts = {
+// Two layouts (fp 900 active/"Default", fp 901 inactive/"Split") so tests
+// can assert the active layout's geometry is fetched eagerly while the
+// inactive one's stays lazy (DESIGN.md SS6).
+const DEFAULT_LAYOUT_FP = 900;
+const SPLIT_LAYOUT_FP = 901;
+const DEFAULT_LAYOUT_KEYS = [
+  { width: 100, height: 100, x: 0, y: 0, r: 0, rx: 0, ry: 0 },
+];
+const SPLIT_LAYOUT_KEYS = [
+  { width: 100, height: 100, x: 0, y: 0, r: 0, rx: 0, ry: 0 },
+  { width: 100, height: 100, x: 100, y: 0, r: 0, rx: 0, ry: 0 },
+];
+
+const LAYOUT_SUMMARIES: PhysicalLayoutsResponse = {
   activeLayoutIndex: 0,
   layouts: [
-    {
-      name: "Default",
-      keys: [{ width: 100, height: 100, x: 0, y: 0, r: 0, rx: 0, ry: 0 }],
-    },
+    { name: "Default", fp: DEFAULT_LAYOUT_FP, keys: [] },
+    { name: "Split", fp: SPLIT_LAYOUT_FP, keys: [] },
   ],
+};
+
+const LAYOUT_GEOMETRY_BY_FP: Record<
+  number,
+  { name: string; keys: typeof DEFAULT_LAYOUT_KEYS }
+> = {
+  [DEFAULT_LAYOUT_FP]: { name: "Default", keys: DEFAULT_LAYOUT_KEYS },
+  [SPLIT_LAYOUT_FP]: { name: "Split", keys: SPLIT_LAYOUT_KEYS },
+};
+
+// Single-layout fixture used by the tests that don't care about the
+// lazy/inactive-layout behavior (unchanged shape from before this
+// protocol's slim-summary rework, just carrying a `fp` now).
+const LAYOUTS: PhysicalLayoutsResponse = {
+  activeLayoutIndex: 0,
+  layouts: [{ name: "Default", fp: DEFAULT_LAYOUT_FP, keys: [] }],
 };
 
 function makeSnapshot(overrides: Partial<Snapshot> = {}): Snapshot {
@@ -174,7 +203,8 @@ function summaryFor(
  * request's mode, exactly like the firmware would. */
 function makeDeviceCall(
   behaviors: BehaviorFixture[] = [KP_BEHAVIOR, CUSTOM_BEHAVIOR],
-  snapshot: Snapshot = SNAPSHOT
+  snapshot: Snapshot = SNAPSHOT,
+  layoutSummaries: PhysicalLayoutsResponse = LAYOUTS
 ): { call: FastKeymapCall; requests: Request[] } {
   const requests: Request[] = [];
   const byLocalId = new Map(behaviors.map((b) => [b.localId, b] as const));
@@ -241,7 +271,40 @@ function makeDeviceCall(
       );
     }
     if (request.getPhysicalLayouts) {
-      return { getPhysicalLayouts: LAYOUTS };
+      // Mirrors the firmware: NONE mode never inlines `keys` (SS6) --
+      // strip any test-fixture geometry so a bug that regresses to always
+      // requesting geometry would surface in the request assertions below,
+      // not just be silently masked by this fixture.
+      expect(request.getPhysicalLayouts.details).toBe(
+        LayoutDetailsMode.LAYOUT_DETAILS_NONE
+      );
+      return {
+        getPhysicalLayouts: {
+          activeLayoutIndex: layoutSummaries.activeLayoutIndex,
+          layouts: layoutSummaries.layouts.map((l) => ({
+            name: l.name,
+            fp: l.fp,
+            keys: [],
+          })),
+        },
+      };
+    }
+    if (request.getPhysicalLayout) {
+      const index = request.getPhysicalLayout.layoutIndex;
+      const summary = layoutSummaries.layouts[index];
+      if (!summary) {
+        throw new Error(`unexpected get_physical_layout(${index})`);
+      }
+      const geometry = LAYOUT_GEOMETRY_BY_FP[summary.fp];
+      if (!geometry) {
+        throw new Error(`no geometry fixture for fp ${summary.fp}`);
+      }
+      return {
+        getPhysicalLayout: {
+          index,
+          layout: { name: geometry.name, fp: summary.fp, keys: geometry.keys },
+        },
+      };
     }
 
     throw new Error(`unhandled request: ${JSON.stringify(request)}`);
@@ -274,7 +337,8 @@ describe("loadFastKeymap", () => {
     // get_snapshot, list_behaviors(CUSTOM, first connect -> empty cache),
     // (kp resolves from bundle, my_custom is inlined by CUSTOM mode -- no
     // get_behaviors needed), get_layer(0), get_default_layer(1),
-    // get_edited_layer(1), get_physical_layouts.
+    // get_edited_layer(1), get_physical_layouts(NONE) + get_physical_layout
+    // for the active (only) layout, whose geometry isn't cached yet.
     expect(requestKinds(requests)).toEqual([
       "getSnapshot",
       "listBehaviors",
@@ -282,6 +346,7 @@ describe("loadFastKeymap", () => {
       "getDefaultLayer",
       "getEditedLayer",
       "getPhysicalLayouts",
+      "getPhysicalLayout",
     ]);
 
     expect(model.behaviors).toHaveLength(2);
@@ -300,7 +365,9 @@ describe("loadFastKeymap", () => {
     expect(fn.bindings).toEqual(FN_EFFECTIVE_BINDINGS);
     expect(fn.loadedFromCache).toBe(false);
 
-    expect(model.layouts).toEqual(LAYOUTS.layouts);
+    expect(model.layouts).toEqual([
+      { name: "Default", fp: DEFAULT_LAYOUT_FP, keys: DEFAULT_LAYOUT_KEYS },
+    ]);
     expect(model.activeLayoutIndex).toBe(0);
 
     expect(model.stats).toEqual({
@@ -482,6 +549,129 @@ describe("loadFastKeymap", () => {
     await expect(
       loadFastKeymap(call, { deviceKey: DEVICE_KEY })
     ).rejects.toThrow(/ERR_GENERIC/);
+  });
+
+  describe("physical layouts (slim summary + on-demand geometry, DESIGN.md SS6)", () => {
+    it("cold path: get_physical_layouts(NONE) has no keys, only the active layout's geometry is fetched, never a non-active one", async () => {
+      const { call, requests } = makeDeviceCall(
+        [KP_BEHAVIOR, CUSTOM_BEHAVIOR],
+        SNAPSHOT,
+        LAYOUT_SUMMARIES
+      );
+
+      const model = await loadFastKeymap(call, { deviceKey: DEVICE_KEY });
+
+      const listRequests = requests.filter((r) => r.getPhysicalLayouts);
+      expect(listRequests).toHaveLength(1);
+      expect(listRequests[0].getPhysicalLayouts?.details).toBe(
+        LayoutDetailsMode.LAYOUT_DETAILS_NONE
+      );
+
+      const geometryRequests = requests.filter((r) => r.getPhysicalLayout);
+      expect(geometryRequests).toHaveLength(1);
+      expect(geometryRequests[0].getPhysicalLayout?.layoutIndex).toBe(
+        LAYOUT_SUMMARIES.activeLayoutIndex
+      );
+
+      // The inactive ("Split", index 1) layout must NOT have had its
+      // geometry fetched.
+      expect(
+        geometryRequests.some((r) => r.getPhysicalLayout?.layoutIndex === 1)
+      ).toBe(false);
+
+      expect(model.layouts).toEqual([
+        { name: "Default", fp: DEFAULT_LAYOUT_FP, keys: DEFAULT_LAYOUT_KEYS },
+        { name: "Split", fp: SPLIT_LAYOUT_FP, keys: undefined },
+      ]);
+      expect(model.activeLayoutIndex).toBe(0);
+    });
+
+    it("per-layout geometry cache: a cached fp for the active layout skips get_physical_layout entirely", async () => {
+      localStorage.setItem(
+        FastKeymapCacheKeys.layoutGeometry(DEVICE_KEY, DEFAULT_LAYOUT_FP),
+        JSON.stringify({
+          name: "Default",
+          fp: DEFAULT_LAYOUT_FP,
+          keys: DEFAULT_LAYOUT_KEYS,
+        })
+      );
+
+      const { call, requests } = makeDeviceCall(
+        [KP_BEHAVIOR, CUSTOM_BEHAVIOR],
+        SNAPSHOT,
+        LAYOUT_SUMMARIES
+      );
+
+      const model = await loadFastKeymap(call, { deviceKey: DEVICE_KEY });
+
+      expect(requests.some((r) => r.getPhysicalLayout)).toBe(false);
+      expect(
+        model.layouts.find((l) => l.fp === DEFAULT_LAYOUT_FP)?.keys
+      ).toEqual(DEFAULT_LAYOUT_KEYS);
+    });
+
+    it("whole-set cache hit: physical_layout_fp match issues zero layout RPCs at all", async () => {
+      localStorage.setItem(
+        FastKeymapCacheKeys.layouts(DEVICE_KEY),
+        JSON.stringify({
+          fp: SNAPSHOT.physicalLayoutFp,
+          activeLayoutIndex: 0,
+          layouts: [
+            {
+              name: "Default",
+              fp: DEFAULT_LAYOUT_FP,
+              keys: DEFAULT_LAYOUT_KEYS,
+            },
+            { name: "Split", fp: SPLIT_LAYOUT_FP, keys: undefined },
+          ],
+        })
+      );
+
+      const { call, requests } = makeDeviceCall(
+        [KP_BEHAVIOR, CUSTOM_BEHAVIOR],
+        SNAPSHOT,
+        LAYOUT_SUMMARIES
+      );
+
+      const model = await loadFastKeymap(call, { deviceKey: DEVICE_KEY });
+
+      expect(requests.some((r) => r.getPhysicalLayouts)).toBe(false);
+      expect(requests.some((r) => r.getPhysicalLayout)).toBe(false);
+      expect(model.stats.physicalLayoutsFromCache).toBe(true);
+      expect(model.layouts).toEqual([
+        { name: "Default", fp: DEFAULT_LAYOUT_FP, keys: DEFAULT_LAYOUT_KEYS },
+        { name: "Split", fp: SPLIT_LAYOUT_FP, keys: undefined },
+      ]);
+    });
+  });
+});
+
+describe("loadPhysicalLayoutGeometry", () => {
+  it("fetches a non-active layout's geometry with one get_physical_layout call and caches it by fp", async () => {
+    const { call, requests } = makeDeviceCall(
+      [KP_BEHAVIOR, CUSTOM_BEHAVIOR],
+      SNAPSHOT,
+      LAYOUT_SUMMARIES
+    );
+
+    const keys = await loadPhysicalLayoutGeometry(call, 1, {
+      deviceKey: DEVICE_KEY,
+    });
+
+    const geometryRequests = requests.filter((r) => r.getPhysicalLayout);
+    expect(geometryRequests).toHaveLength(1);
+    expect(geometryRequests[0].getPhysicalLayout?.layoutIndex).toBe(1);
+    expect(keys).toEqual(SPLIT_LAYOUT_KEYS);
+
+    const cached = localStorage.getItem(
+      FastKeymapCacheKeys.layoutGeometry(DEVICE_KEY, SPLIT_LAYOUT_FP)
+    );
+    expect(cached).not.toBeNull();
+    expect(JSON.parse(cached!)).toEqual({
+      name: "Split",
+      fp: SPLIT_LAYOUT_FP,
+      keys: SPLIT_LAYOUT_KEYS,
+    });
   });
 });
 

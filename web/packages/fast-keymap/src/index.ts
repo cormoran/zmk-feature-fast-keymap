@@ -7,6 +7,7 @@
 
 export {
   loadFastKeymap,
+  loadPhysicalLayoutGeometry,
   indexBehaviorsById,
   formatBindingToken,
   exportKeymapText,
@@ -54,8 +55,11 @@ export type {
   Layer,
   EditedBinding,
   EditedLayer,
-  PhysicalLayouts,
-  PhysicalLayout,
+  GetPhysicalLayoutsRequest,
+  GetPhysicalLayoutRequest,
+  PhysicalLayoutsResponse,
+  PhysicalLayoutResponse,
+  PhysicalLayoutSummary,
   KeyPhysicalAttrs,
 } from "./proto/cormoran/fast-keymap/fast_keymap";
 
@@ -64,4 +68,5 @@ export {
   Response,
   ErrorCode,
   BehaviorDetailsMode,
+  LayoutDetailsMode,
 } from "./proto/cormoran/fast-keymap/fast_keymap";
