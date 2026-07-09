@@ -19,9 +19,17 @@ import {
   indexBehaviorsById,
   loadFastKeymap,
   type FastKeymapBehavior,
+  type FastKeymapCall,
   type FastKeymapLayer,
   type FastKeymapModel,
 } from "zmk-feature-fast-keymap";
+import type { RpcConnection } from "@zmkfirmware/zmk-studio-ts-client";
+import {
+  runBenchmark,
+  type BenchmarkMeasurement,
+  type BenchmarkResult,
+  type BenchmarkRun,
+} from "./benchmark";
 
 export const SUBSYSTEM_IDENTIFIER = "cormoran__fast_keymap";
 
@@ -249,6 +257,128 @@ function ExportPanel({ model }: { model: FastKeymapModel }) {
   );
 }
 
+/** Renders one `BenchmarkMeasurement` cell: the elapsed time, or an
+ * error/lock indicator when that run failed (see benchmark.ts's "robust to
+ * a run failing" note). */
+function formatMeasurement(measurement: BenchmarkMeasurement): string {
+  if (measurement.error) {
+    return measurement.unlockRequired ? "🔒 locked" : `⚠️ ${measurement.error}`;
+  }
+  return `${measurement.ms.toFixed(1)} ms`;
+}
+
+function BenchmarkRow({ label, run }: { label: string; run: BenchmarkRun }) {
+  return (
+    <tr>
+      <td>{label}</td>
+      <td>{formatMeasurement(run.initial)}</td>
+      <td>{formatMeasurement(run.second)}</td>
+      <td>
+        {run.initial.rpcCalls} / {run.second.rpcCalls}
+      </td>
+    </tr>
+  );
+}
+
+/** Computes fast-keymap's 2nd-load speedup vs. the official path's 2nd
+ * load -- `null` when either measurement isn't a clean success (nothing
+ * meaningful to compare then). */
+function secondLoadSpeedup(result: BenchmarkResult): number | null {
+  const { fastKeymap, official } = result;
+  if (fastKeymap.second.error || official.second.error) return null;
+  if (fastKeymap.second.ms <= 0) return null;
+  return official.second.ms / fastKeymap.second.ms;
+}
+
+/**
+ * Runs and displays the fast-keymap-vs-official-RPC load-time benchmark
+ * (DESIGN.md "Why") -- see benchmark.ts for the measurement logic. Reuses
+ * `FastKeymapSection`'s own subsystem `call` and the live `connection` from
+ * `ZMKAppContext` so this panel needs no connection setup of its own.
+ */
+function BenchmarkPanel({
+  call,
+  ready,
+  connection,
+}: {
+  call: FastKeymapCall;
+  ready: boolean;
+  connection: RpcConnection | null;
+}) {
+  const [result, setResult] = useState<BenchmarkResult | null>(null);
+  const [isRunning, setIsRunning] = useState(false);
+
+  const run = useCallback(async () => {
+    if (!ready || !connection) return;
+    setIsRunning(true);
+    try {
+      setResult(await runBenchmark(call, connection));
+    } finally {
+      setIsRunning(false);
+    }
+  }, [ready, connection, call]);
+
+  const speedup = result ? secondLoadSpeedup(result) : null;
+
+  return (
+    <div className="card benchmark-panel">
+      <h3>⏱️ Benchmark: fast-keymap vs. official RPC</h3>
+      <p className="hint-message">
+        Compares load time for fast-keymap's custom subsystem against ZMK
+        Studio's official <code>behaviors</code>/<code>keymap</code> core RPCs,
+        for an initial load and a second (repeat) load. The official path has no
+        client-side cache -- every load re-fetches everything -- so its "2nd
+        load" should take about as long as its "initial load". The official path
+        also requires ZMK Studio to be unlocked (<code>&amp;studio_unlock</code>
+        ); fast-keymap does not.
+      </p>
+
+      <button
+        className="btn btn-secondary"
+        disabled={!ready || !connection || isRunning}
+        onClick={() => void run()}
+      >
+        {isRunning ? "⏳ Running..." : "▶️ Run Benchmark"}
+      </button>
+
+      {result && (
+        <table className="benchmark-table">
+          <thead>
+            <tr>
+              <th>Loader</th>
+              <th>Initial load</th>
+              <th>2nd load</th>
+              <th>RPC round-trips (initial / 2nd)</th>
+            </tr>
+          </thead>
+          <tbody>
+            <BenchmarkRow label="⚡ fast-keymap" run={result.fastKeymap} />
+            <BenchmarkRow label="📡 official RPC" run={result.official} />
+          </tbody>
+        </table>
+      )}
+
+      {speedup !== null && (
+        <p className="badge badge-cache">
+          ⚡ fast-keymap's 2nd load was {speedup.toFixed(1)}x faster than the
+          official path's 2nd load
+        </p>
+      )}
+
+      {(result?.official.initial.unlockRequired ||
+        result?.official.second.unlockRequired) && (
+        <div className="unlock-prompt card">
+          <p>
+            🔒 The official RPC path needs ZMK Studio to be unlocked to
+            benchmark it. Press the unlock key (<code>&amp;studio_unlock</code>{" "}
+            behavior) on your keyboard, then run the benchmark again.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function FastKeymapSection() {
   const zmkApp = useContext(ZMKAppContext);
   const { ready, subsystem, call } = useCustomSubsystem(SUBSYSTEM_IDENTIFIER, {
@@ -408,6 +538,12 @@ export function FastKeymapSection() {
           <ExportPanel model={model} />
         </>
       )}
+
+      <BenchmarkPanel
+        call={call}
+        ready={ready}
+        connection={zmkApp.state.connection}
+      />
     </section>
   );
 }

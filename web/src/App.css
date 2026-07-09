@@ -75,3 +75,20 @@
   font-size: 0.85rem;
   color: #666;
 }
+
+.benchmark-panel {
+  margin-top: 1.5rem;
+}
+
+.benchmark-table {
+  width: 100%;
+  margin-top: 1rem;
+  border-collapse: collapse;
+}
+
+.benchmark-table th,
+.benchmark-table td {
+  border: 1px solid #ccc;
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+}

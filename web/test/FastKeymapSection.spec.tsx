@@ -381,4 +381,149 @@ describe("FastKeymapSection", () => {
       });
     });
   });
+
+  describe("Benchmark panel", () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const zmkClient = require("@zmkfirmware/zmk-studio-ts-client");
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+    });
+
+    interface CallRpcRequest {
+      core?: { getLockState?: boolean };
+      custom?: { call?: { payload: Uint8Array } };
+      behaviors?: {
+        listAllBehaviors?: boolean;
+        getBehaviorDetails?: { behaviorId: number };
+      };
+      keymap?: { getKeymap?: boolean };
+    }
+
+    // Handles both the fast-keymap custom-subsystem traffic (reusing this
+    // file's `buildResponse` fixture) and the official core `behaviors` /
+    // `keymap` RPCs the benchmark panel's official path drives directly --
+    // see src/officialKeymap.ts.
+    function mockCallRpc({ officialLocked }: { officialLocked: boolean }) {
+      zmkClient.call_rpc.mockImplementation(
+        (_connection: unknown, req: CallRpcRequest) => {
+          if (req.core?.getLockState) {
+            return Promise.resolve({
+              core: {
+                getLockState: LockState.ZMK_STUDIO_CORE_LOCK_STATE_UNLOCKED,
+              },
+            });
+          }
+          if (req.custom?.call) {
+            const decoded = Request.decode(req.custom.call.payload);
+            const response = buildResponse(decoded);
+            return Promise.resolve({
+              custom: { call: { payload: Response.encode(response).finish() } },
+            });
+          }
+          if (req.behaviors?.listAllBehaviors) {
+            return Promise.resolve({
+              behaviors: { listAllBehaviors: { behaviors: [1] } },
+            });
+          }
+          if (req.behaviors?.getBehaviorDetails) {
+            if (officialLocked) {
+              return Promise.reject(new zmkClient.MetaError(UNLOCK_REQUIRED));
+            }
+            return Promise.resolve({
+              behaviors: {
+                getBehaviorDetails: {
+                  id: 1,
+                  displayName: "Key Press",
+                  metadata: [],
+                },
+              },
+            });
+          }
+          if (req.keymap?.getKeymap) {
+            if (officialLocked) {
+              return Promise.reject(new zmkClient.MetaError(UNLOCK_REQUIRED));
+            }
+            return Promise.resolve({
+              keymap: {
+                getKeymap: {
+                  layers: [
+                    {
+                      id: 0,
+                      name: "Base",
+                      bindings: [{ behaviorId: 1, param1: 4, param2: 0 }],
+                    },
+                  ],
+                  availableLayers: 4,
+                  maxLayerNameLength: 8,
+                },
+              },
+            });
+          }
+          return Promise.reject(new Error("unexpected call_rpc request"));
+        }
+      );
+    }
+
+    it("renders the fast-keymap vs. official comparison table after a run", async () => {
+      mockCallRpc({ officialLocked: false });
+      const mockZMKApp = createConnectedMockZMKApp({
+        deviceName: "Test Device",
+        subsystems: [SUBSYSTEM_IDENTIFIER],
+      });
+
+      render(
+        <ZMKAppProvider value={mockZMKApp}>
+          <FastKeymapSection />
+        </ZMKAppProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText(/Behaviors \(1\)/i)).toBeInTheDocument();
+      });
+
+      const user = userEvent.setup();
+      await user.click(screen.getByText(/Run Benchmark/i));
+
+      await waitFor(() => {
+        expect(
+          screen.getByRole("cell", { name: "⚡ fast-keymap" })
+        ).toBeInTheDocument();
+        expect(
+          screen.getByRole("cell", { name: "📡 official RPC" })
+        ).toBeInTheDocument();
+      });
+    });
+
+    it("surfaces the unlock message instead of crashing when the official path is locked", async () => {
+      mockCallRpc({ officialLocked: true });
+      const mockZMKApp = createConnectedMockZMKApp({
+        deviceName: "Test Device",
+        subsystems: [SUBSYSTEM_IDENTIFIER],
+      });
+
+      render(
+        <ZMKAppProvider value={mockZMKApp}>
+          <FastKeymapSection />
+        </ZMKAppProvider>
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText(/Behaviors \(1\)/i)).toBeInTheDocument();
+      });
+
+      const user = userEvent.setup();
+      await user.click(screen.getByText(/Run Benchmark/i));
+
+      await waitFor(() => {
+        expect(
+          screen.getByText(/needs ZMK Studio to be unlocked/i)
+        ).toBeInTheDocument();
+      });
+
+      // The fast-keymap side of the panel still succeeded -- only the
+      // official path's two cells are reported as locked.
+      expect(screen.getAllByText(/🔒 locked/i)).toHaveLength(2);
+    });
+  });
 });
