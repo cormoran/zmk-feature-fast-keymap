@@ -12,6 +12,7 @@
 
 #include <drivers/behavior.h>
 #include <zmk/keymap.h>
+#include <zmk/physical_layouts.h>
 
 /* Compatibility contract version for the canonical fingerprint byte layouts
  * frozen in DESIGN.md SS4/SS5. Bump this (and the mirrored TS constant in
@@ -63,6 +64,14 @@ uint32_t fk_fp_keymap(void);
 
 /** physical_layout_fp: over the canonical physical layouts (SS4). */
 uint32_t fk_fp_physical_layout(void);
+
+/** per-layout physical `fp` (SS4/SS6): one layout's `str16 name` + `u16
+ * key_count` + per key `i16 width,height,x,y,r,rx,ry` (rotation fields 0
+ * when CONFIG_ZMK_PHYSICAL_LAYOUT_KEY_ROTATION is off). Device-opaque -- the
+ * web caches+compares it, never recomputes it. Shares its preimage with
+ * fk_fp_physical_layout() (the whole-set fp), so a per-layout fp and the
+ * corresponding entry inside the whole-set fp can never disagree. */
+uint32_t fk_fp_physical_layout_one(const struct zmk_physical_layout *layout);
 
 /** fp for one layer's CURRENT bindings only (no layer_id/name prefix -- the
  * LayerFingerprint message already carries `id` separately). */

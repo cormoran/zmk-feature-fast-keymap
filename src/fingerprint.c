@@ -284,6 +284,40 @@ uint32_t fk_fp_keymap(void) {
     return seed;
 }
 
+/* Per-layout physical fp preimage (DESIGN.md SS4/SS6): one layout's `str16
+ * name` + `u16 key_count` + per key `i16 width,height,x,y,r,rx,ry` (rotation
+ * fields 0 when CONFIG_ZMK_PHYSICAL_LAYOUT_KEY_ROTATION is off). Shared by
+ * fk_fp_physical_layout_one() (seed 0) and fk_fp_physical_layout() (chained
+ * per layout after the active-index prefix) so the two can never disagree,
+ * same pattern as crc_behavior_def_preimage()/fk_fp_behaviors() above. */
+static uint32_t crc_physical_layout_preimage(uint32_t seed, const struct zmk_physical_layout *l) {
+    seed = crc_str_u16len(seed, l->display_name);
+    seed = crc_u16le(seed, (uint16_t)l->keys_len);
+
+    for (size_t k = 0; k < l->keys_len; k++) {
+        const struct zmk_key_physical_attrs *attrs = &l->keys[k];
+        seed = crc_i16le(seed, attrs->width);
+        seed = crc_i16le(seed, attrs->height);
+        seed = crc_i16le(seed, attrs->x);
+        seed = crc_i16le(seed, attrs->y);
+#if IS_ENABLED(CONFIG_ZMK_PHYSICAL_LAYOUT_KEY_ROTATION)
+        seed = crc_i16le(seed, attrs->r);
+        seed = crc_i16le(seed, attrs->rx);
+        seed = crc_i16le(seed, attrs->ry);
+#else
+        seed = crc_i16le(seed, 0);
+        seed = crc_i16le(seed, 0);
+        seed = crc_i16le(seed, 0);
+#endif
+    }
+
+    return seed;
+}
+
+uint32_t fk_fp_physical_layout_one(const struct zmk_physical_layout *layout) {
+    return crc_physical_layout_preimage(0, layout);
+}
+
 uint32_t fk_fp_physical_layout(void) {
     uint32_t seed = 0;
     seed = crc_u8(seed, (uint8_t)zmk_physical_layouts_get_selected());
@@ -292,26 +326,7 @@ uint32_t fk_fp_physical_layout(void) {
     size_t layout_count = zmk_physical_layouts_get_list(&layouts);
 
     for (size_t i = 0; i < layout_count; i++) {
-        const struct zmk_physical_layout *l = layouts[i];
-        seed = crc_str_u16len(seed, l->display_name);
-        seed = crc_u16le(seed, (uint16_t)l->keys_len);
-
-        for (size_t k = 0; k < l->keys_len; k++) {
-            const struct zmk_key_physical_attrs *attrs = &l->keys[k];
-            seed = crc_i16le(seed, attrs->width);
-            seed = crc_i16le(seed, attrs->height);
-            seed = crc_i16le(seed, attrs->x);
-            seed = crc_i16le(seed, attrs->y);
-#if IS_ENABLED(CONFIG_ZMK_PHYSICAL_LAYOUT_KEY_ROTATION)
-            seed = crc_i16le(seed, attrs->r);
-            seed = crc_i16le(seed, attrs->rx);
-            seed = crc_i16le(seed, attrs->ry);
-#else
-            seed = crc_i16le(seed, 0);
-            seed = crc_i16le(seed, 0);
-            seed = crc_i16le(seed, 0);
-#endif
-        }
+        seed = crc_physical_layout_preimage(seed, layouts[i]);
     }
 
     return seed;

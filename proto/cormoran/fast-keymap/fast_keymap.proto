@@ -15,11 +15,12 @@ message Request {
     oneof request_type {
         bool get_snapshot = 1;
         ListBehaviorsRequest list_behaviors = 2;
-        GetBehaviorsRequest get_behaviors = 3; // batch details (miss-repair)
-        GetLayerRequest get_layer = 4;         // current/effective
-        GetLayerRequest get_default_layer = 5; // DT stock default
-        GetLayerRequest get_edited_layer = 6;  // diff current vs default
-        bool get_physical_layouts = 7;
+        GetBehaviorsRequest get_behaviors = 3;              // batch details (miss-repair)
+        GetLayerRequest get_layer = 4;                      // current/effective
+        GetLayerRequest get_default_layer = 5;              // DT stock default
+        GetLayerRequest get_edited_layer = 6;               // diff current vs default
+        GetPhysicalLayoutsRequest get_physical_layouts = 7; // slim summary (+ optional geometry)
+        GetPhysicalLayoutRequest get_physical_layout = 8;   // one layout's geometry
     }
 }
 
@@ -32,7 +33,8 @@ message Response {
         Layer get_layer = 5;
         Layer get_default_layer = 6;
         EditedLayer get_edited_layer = 7;
-        PhysicalLayouts get_physical_layouts = 8;
+        PhysicalLayoutsResponse get_physical_layouts = 8;
+        PhysicalLayoutResponse get_physical_layout = 9;
     }
 }
 
@@ -42,6 +44,7 @@ enum ErrorCode {
     ERR_GENERIC = 0;
     ERR_INVALID_LAYER = 1;
     ERR_INVALID_BEHAVIOR = 2;
+    ERR_INVALID_LAYOUT = 3;
 }
 
 message ErrorResponse { ErrorCode code = 1; }
@@ -172,14 +175,34 @@ message EditedLayer {
     repeated EditedBinding bindings = 2;
 }
 
-message PhysicalLayouts {
-    uint32 active_layout_index = 1;
-    repeated PhysicalLayout layouts = 2;
+// enum LayoutDetailsMode -- see DESIGN.md SS6 for the semantics of each mode.
+enum LayoutDetailsMode {
+    LAYOUT_DETAILS_NONE = 0; // slim summaries only (no geometry)
+    LAYOUT_DETAILS_ALL = 1;  // inline every layout's geometry
 }
 
-message PhysicalLayout {
+message GetPhysicalLayoutsRequest { LayoutDetailsMode details = 1; }
+
+message GetPhysicalLayoutRequest { uint32 layout_index = 1; }
+
+// Slim summary + on-demand geometry (DESIGN.md SS6): `keys` is populated only
+// in LAYOUT_DETAILS_ALL mode (get_physical_layouts) or a single-layout fetch
+// (get_physical_layout) -- omitted (empty) otherwise, so proto3 drops it for
+// free on the wire.
+message PhysicalLayoutsResponse {
+    uint32 active_layout_index = 1;
+    repeated PhysicalLayoutSummary layouts = 2;
+}
+
+message PhysicalLayoutResponse {
+    uint32 index = 1;
+    PhysicalLayoutSummary layout = 2; // keys always populated
+}
+
+message PhysicalLayoutSummary {
     string name = 1;
-    repeated KeyPhysicalAttrs keys = 2;
+    uint32 fp = 2; // per-layout fingerprint, device-opaque (SS4/SS6)
+    repeated KeyPhysicalAttrs keys = 3;
 }
 
 message KeyPhysicalAttrs {

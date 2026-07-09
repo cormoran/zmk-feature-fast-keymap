@@ -531,6 +531,73 @@ find_behavior_entry_by_id(const behavior_entry_capture_array_t *cap, uint32_t id
     return NULL;
 }
 
+/* -- get_physical_layouts / get_physical_layout decode helpers ---------- */
+
+struct key_attrs_capture {
+    int32_t width, height, x, y, r, rx, ry;
+};
+typedef CAPTURE_ARRAY(struct key_attrs_capture, 8) key_attrs_capture_t;
+
+static bool decode_key_attrs_cb(pb_istream_t *stream, const pb_field_t *field, void **arg) {
+    ARG_UNUSED(field);
+    key_attrs_capture_t *cap = *arg;
+    if (cap->count >= ARRAY_SIZE(cap->entries)) {
+        LOG_ERR("too many keys for test capture");
+        return false;
+    }
+
+    cormoran_fast_keymap_KeyPhysicalAttrs tmp = cormoran_fast_keymap_KeyPhysicalAttrs_init_zero;
+    if (!pb_decode(stream, cormoran_fast_keymap_KeyPhysicalAttrs_fields, &tmp)) {
+        return false;
+    }
+
+    struct key_attrs_capture *e = &cap->entries[cap->count++];
+    e->width = tmp.width;
+    e->height = tmp.height;
+    e->x = tmp.x;
+    e->y = tmp.y;
+    e->r = tmp.r;
+    e->rx = tmp.rx;
+    e->ry = tmp.ry;
+    return true;
+}
+
+struct layout_summary_capture {
+    char name[48];
+    uint32_t fp;
+    key_attrs_capture_t keys;
+};
+typedef CAPTURE_ARRAY(struct layout_summary_capture, 4) layout_summary_capture_t;
+
+static bool decode_layout_summary_cb(pb_istream_t *stream, const pb_field_t *field, void **arg) {
+    ARG_UNUSED(field);
+    layout_summary_capture_t *captured = *arg;
+    if (captured->count >= ARRAY_SIZE(captured->entries)) {
+        LOG_ERR("too many physical layouts for test capture");
+        return false;
+    }
+
+    cormoran_fast_keymap_PhysicalLayoutSummary tmp =
+        cormoran_fast_keymap_PhysicalLayoutSummary_init_zero;
+    struct str_capture name_cap = {0};
+    key_attrs_capture_t keys_cap = {0};
+    tmp.name.funcs.decode = decode_str_cb;
+    tmp.name.arg = &name_cap;
+    tmp.keys.funcs.decode = decode_key_attrs_cb;
+    tmp.keys.arg = &keys_cap;
+
+    if (!pb_decode(stream, cormoran_fast_keymap_PhysicalLayoutSummary_fields, &tmp)) {
+        return false;
+    }
+
+    struct layout_summary_capture *e = &captured->entries[captured->count++];
+    strncpy(e->name, name_cap.buf, sizeof(e->name) - 1);
+    e->name[sizeof(e->name) - 1] = '\0';
+    e->fp = tmp.fp;
+    e->keys = keys_cap;
+    return true;
+}
+
 /* -- tests ------------------------------------------------------------- */
 
 static int test_snapshot_fingerprint_stable(void) {
@@ -888,6 +955,201 @@ static int test_get_behaviors_batch(void) {
     return 0;
 }
 
+/* Covers DESIGN.md SS6's slim-summary + on-demand-geometry physical layouts
+ * API: NONE mode omits `keys` entirely, ALL mode inlines it, a single
+ * get_physical_layout(index) fetch returns the same fp/name/keys as the
+ * ALL-mode summary, per-layout fp is deterministic across calls, an
+ * out-of-range index yields ERR_INVALID_LAYOUT, and the Snapshot's whole-set
+ * physical_layout_fp stays stable across all these read-only calls.
+ * tests/studio/native_sim.keymap's physical layout ("Custom Layout") has
+ * exactly one layout with 4 keys -- see tests/test.dtsi. */
+static int test_physical_layouts(void) {
+    /* NONE (default): summaries only, no keys. */
+    cormoran_fast_keymap_Request none_req = cormoran_fast_keymap_Request_init_zero;
+    none_req.which_request_type = cormoran_fast_keymap_Request_get_physical_layouts_tag;
+    none_req.request_type.get_physical_layouts = (cormoran_fast_keymap_GetPhysicalLayoutsRequest)
+        cormoran_fast_keymap_GetPhysicalLayoutsRequest_init_zero;
+    none_req.request_type.get_physical_layouts.details =
+        cormoran_fast_keymap_LayoutDetailsMode_LAYOUT_DETAILS_NONE;
+
+    cormoran_fast_keymap_Response none_resp = cormoran_fast_keymap_Response_init_zero;
+    static layout_summary_capture_t none_cap;
+    none_cap = (layout_summary_capture_t){0};
+    none_resp.which_response_type = cormoran_fast_keymap_Response_get_physical_layouts_tag;
+    none_resp.response_type.get_physical_layouts = (cormoran_fast_keymap_PhysicalLayoutsResponse)
+        cormoran_fast_keymap_PhysicalLayoutsResponse_init_zero;
+    none_resp.response_type.get_physical_layouts.layouts.funcs.decode = decode_layout_summary_cb;
+    none_resp.response_type.get_physical_layouts.layouts.arg = &none_cap;
+
+    if (!call_fast_keymap_rpc(&none_req, &none_resp)) {
+        return -EINVAL;
+    }
+    if (none_resp.which_response_type != cormoran_fast_keymap_Response_get_physical_layouts_tag) {
+        LOG_ERR("get_physical_layouts(NONE) unexpected response type %d",
+                none_resp.which_response_type);
+        return -EINVAL;
+    }
+    if (none_cap.count != 1) {
+        LOG_ERR("get_physical_layouts(NONE) expected 1 layout (test.dtsi defines one), got %u",
+                (unsigned int)none_cap.count);
+        return -EINVAL;
+    }
+    if (strlen(none_cap.entries[0].name) == 0) {
+        LOG_ERR("get_physical_layouts(NONE) layout name is empty");
+        return -EINVAL;
+    }
+    if (none_cap.entries[0].fp == 0) {
+        LOG_ERR("get_physical_layouts(NONE) layout fp is zero");
+        return -EINVAL;
+    }
+    if (none_cap.entries[0].keys.count != 0) {
+        LOG_ERR("get_physical_layouts(NONE) unexpectedly included keys (count=%u)",
+                (unsigned int)none_cap.entries[0].keys.count);
+        return -EINVAL;
+    }
+    if (none_resp.response_type.get_physical_layouts.active_layout_index !=
+        zmk_physical_layouts_get_selected()) {
+        LOG_ERR("get_physical_layouts active_layout_index mismatch");
+        return -EINVAL;
+    }
+
+    /* ALL: same summary, plus keys. */
+    cormoran_fast_keymap_Request all_req = cormoran_fast_keymap_Request_init_zero;
+    all_req.which_request_type = cormoran_fast_keymap_Request_get_physical_layouts_tag;
+    all_req.request_type.get_physical_layouts = (cormoran_fast_keymap_GetPhysicalLayoutsRequest)
+        cormoran_fast_keymap_GetPhysicalLayoutsRequest_init_zero;
+    all_req.request_type.get_physical_layouts.details =
+        cormoran_fast_keymap_LayoutDetailsMode_LAYOUT_DETAILS_ALL;
+
+    cormoran_fast_keymap_Response all_resp = cormoran_fast_keymap_Response_init_zero;
+    static layout_summary_capture_t all_cap;
+    all_cap = (layout_summary_capture_t){0};
+    all_resp.which_response_type = cormoran_fast_keymap_Response_get_physical_layouts_tag;
+    all_resp.response_type.get_physical_layouts = (cormoran_fast_keymap_PhysicalLayoutsResponse)
+        cormoran_fast_keymap_PhysicalLayoutsResponse_init_zero;
+    all_resp.response_type.get_physical_layouts.layouts.funcs.decode = decode_layout_summary_cb;
+    all_resp.response_type.get_physical_layouts.layouts.arg = &all_cap;
+
+    if (!call_fast_keymap_rpc(&all_req, &all_resp)) {
+        return -EINVAL;
+    }
+    if (all_cap.count != 1) {
+        LOG_ERR("get_physical_layouts(ALL) expected 1 layout, got %u", (unsigned int)all_cap.count);
+        return -EINVAL;
+    }
+    if (all_cap.entries[0].keys.count == 0) {
+        LOG_ERR("get_physical_layouts(ALL) unexpectedly missing keys");
+        return -EINVAL;
+    }
+    if (all_cap.entries[0].fp != none_cap.entries[0].fp) {
+        LOG_ERR("per-layout fp differs between NONE (%u) and ALL (%u) modes",
+                none_cap.entries[0].fp, all_cap.entries[0].fp);
+        return -EINVAL;
+    }
+
+    /* fp determinism: repeating the ALL-mode request yields the same fp. */
+    static layout_summary_capture_t all_cap2;
+    all_cap2 = (layout_summary_capture_t){0};
+    cormoran_fast_keymap_Response all_resp2 = cormoran_fast_keymap_Response_init_zero;
+    all_resp2.which_response_type = cormoran_fast_keymap_Response_get_physical_layouts_tag;
+    all_resp2.response_type.get_physical_layouts = (cormoran_fast_keymap_PhysicalLayoutsResponse)
+        cormoran_fast_keymap_PhysicalLayoutsResponse_init_zero;
+    all_resp2.response_type.get_physical_layouts.layouts.funcs.decode = decode_layout_summary_cb;
+    all_resp2.response_type.get_physical_layouts.layouts.arg = &all_cap2;
+    if (!call_fast_keymap_rpc(&all_req, &all_resp2)) {
+        return -EINVAL;
+    }
+    if (all_cap2.count != 1 || all_cap2.entries[0].fp != all_cap.entries[0].fp) {
+        LOG_ERR("per-layout fp not deterministic across calls");
+        return -EINVAL;
+    }
+
+    /* get_physical_layout(0): single-layout geometry fetch must agree with
+     * the ALL-mode summary's name/fp/keys. */
+    cormoran_fast_keymap_Request single_req = cormoran_fast_keymap_Request_init_zero;
+    single_req.which_request_type = cormoran_fast_keymap_Request_get_physical_layout_tag;
+    single_req.request_type.get_physical_layout.layout_index = 0;
+
+    cormoran_fast_keymap_Response single_resp = cormoran_fast_keymap_Response_init_zero;
+    static struct str_capture single_name_cap;
+    single_name_cap = (struct str_capture){0};
+    static key_attrs_capture_t single_keys_cap;
+    single_keys_cap = (key_attrs_capture_t){0};
+    single_resp.which_response_type = cormoran_fast_keymap_Response_get_physical_layout_tag;
+    single_resp.response_type.get_physical_layout = (cormoran_fast_keymap_PhysicalLayoutResponse)
+        cormoran_fast_keymap_PhysicalLayoutResponse_init_zero;
+    single_resp.response_type.get_physical_layout.layout.name.funcs.decode = decode_str_cb;
+    single_resp.response_type.get_physical_layout.layout.name.arg = &single_name_cap;
+    single_resp.response_type.get_physical_layout.layout.keys.funcs.decode = decode_key_attrs_cb;
+    single_resp.response_type.get_physical_layout.layout.keys.arg = &single_keys_cap;
+
+    if (!call_fast_keymap_rpc(&single_req, &single_resp)) {
+        return -EINVAL;
+    }
+    if (single_resp.which_response_type != cormoran_fast_keymap_Response_get_physical_layout_tag) {
+        LOG_ERR("get_physical_layout(0) unexpected response type %d",
+                single_resp.which_response_type);
+        return -EINVAL;
+    }
+    if (single_resp.response_type.get_physical_layout.index != 0) {
+        LOG_ERR("get_physical_layout(0) unexpected index %u",
+                single_resp.response_type.get_physical_layout.index);
+        return -EINVAL;
+    }
+    if (single_resp.response_type.get_physical_layout.layout.fp != all_cap.entries[0].fp) {
+        LOG_ERR("get_physical_layout(0) fp (%u) != get_physical_layouts summary fp (%u)",
+                single_resp.response_type.get_physical_layout.layout.fp, all_cap.entries[0].fp);
+        return -EINVAL;
+    }
+    if (single_keys_cap.count != all_cap.entries[0].keys.count) {
+        LOG_ERR("get_physical_layout(0) returned %u keys, expected %u",
+                (unsigned int)single_keys_cap.count, (unsigned int)all_cap.entries[0].keys.count);
+        return -EINVAL;
+    }
+    if (strcmp(single_name_cap.buf, none_cap.entries[0].name) != 0) {
+        LOG_ERR("get_physical_layout(0) name '%s' != get_physical_layouts summary name '%s'",
+                single_name_cap.buf, none_cap.entries[0].name);
+        return -EINVAL;
+    }
+
+    /* Out-of-range layout_index -> ERR_INVALID_LAYOUT. */
+    cormoran_fast_keymap_Request bad_req = cormoran_fast_keymap_Request_init_zero;
+    bad_req.which_request_type = cormoran_fast_keymap_Request_get_physical_layout_tag;
+    bad_req.request_type.get_physical_layout.layout_index = 250;
+
+    cormoran_fast_keymap_Response bad_resp = cormoran_fast_keymap_Response_init_zero;
+    if (!call_fast_keymap_rpc(&bad_req, &bad_resp)) {
+        return -EINVAL;
+    }
+    if (bad_resp.which_response_type != cormoran_fast_keymap_Response_error_tag ||
+        bad_resp.response_type.error.code != cormoran_fast_keymap_ErrorCode_ERR_INVALID_LAYOUT) {
+        LOG_ERR("get_physical_layout with an out-of-range index should return ERR_INVALID_LAYOUT "
+                "(got type=%d code=%d)",
+                bad_resp.which_response_type, bad_resp.response_type.error.code);
+        return -EINVAL;
+    }
+
+    /* Snapshot's whole-set physical_layout_fp stays stable across all the
+     * read-only physical-layout RPCs above. */
+    cormoran_fast_keymap_Request snap_req = cormoran_fast_keymap_Request_init_zero;
+    snap_req.which_request_type = cormoran_fast_keymap_Request_get_snapshot_tag;
+    snap_req.request_type.get_snapshot = true;
+
+    cormoran_fast_keymap_Response snap1 = cormoran_fast_keymap_Response_init_zero;
+    cormoran_fast_keymap_Response snap2 = cormoran_fast_keymap_Response_init_zero;
+    if (!call_fast_keymap_rpc(&snap_req, &snap1) || !call_fast_keymap_rpc(&snap_req, &snap2)) {
+        return -EINVAL;
+    }
+    if (snap1.response_type.snapshot.physical_layout_fp !=
+        snap2.response_type.snapshot.physical_layout_fp) {
+        LOG_ERR("Snapshot physical_layout_fp not stable across get_physical_layout* calls");
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: fast_keymap_physical_layouts");
+    return 0;
+}
+
 static int test_edited_diff_and_default(void) {
     cormoran_fast_keymap_Request snap_req = cormoran_fast_keymap_Request_init_zero;
     snap_req.which_request_type = cormoran_fast_keymap_Request_get_snapshot_tag;
@@ -1138,6 +1400,11 @@ static int fast_keymap_rpc_test_init(void) {
     }
 
     ret = test_get_behaviors_batch();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_physical_layouts();
     if (ret < 0) {
         return ret;
     }

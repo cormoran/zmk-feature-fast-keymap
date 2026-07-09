@@ -638,8 +638,16 @@ static bool encode_layout_keys(pb_ostream_t *stream, const pb_field_t *field, vo
     return true;
 }
 
-static bool encode_layouts(pb_ostream_t *stream, const pb_field_t *field, void *const *arg) {
-    ARG_UNUSED(arg);
+/* Copied out of the request into static storage before returning, same
+ * reason as fk_list_behaviors_mode above: encode_physical_layout_summaries()
+ * runs after handle_get_physical_layouts() returns (SS3's size-pass/encode-
+ * pass), so it cannot read from a stack-local mode variable. */
+static cormoran_fast_keymap_LayoutDetailsMode fk_physical_layouts_mode;
+
+static bool encode_physical_layout_summaries(pb_ostream_t *stream, const pb_field_t *field,
+                                             void *const *arg) {
+    cormoran_fast_keymap_LayoutDetailsMode mode =
+        *(const cormoran_fast_keymap_LayoutDetailsMode *)*arg;
 
     struct zmk_physical_layout const *const *layouts;
     size_t layout_count = zmk_physical_layouts_get_list(&layouts);
@@ -651,13 +659,21 @@ static bool encode_layouts(pb_ostream_t *stream, const pb_field_t *field, void *
             return false;
         }
 
-        cormoran_fast_keymap_PhysicalLayout layout = cormoran_fast_keymap_PhysicalLayout_init_zero;
-        layout.name.funcs.encode = encode_layout_name;
-        layout.name.arg = (void *)l;
-        layout.keys.funcs.encode = encode_layout_keys;
-        layout.keys.arg = (void *)l;
+        cormoran_fast_keymap_PhysicalLayoutSummary summary =
+            cormoran_fast_keymap_PhysicalLayoutSummary_init_zero;
+        summary.name.funcs.encode = encode_layout_name;
+        summary.name.arg = (void *)l;
+        summary.fp = fk_fp_physical_layout_one(l);
 
-        if (!pb_encode_submessage(stream, &cormoran_fast_keymap_PhysicalLayout_msg, &layout)) {
+        /* DESIGN.md SS6: NONE -> summary only (name + fp, keys omitted for
+         * free by proto3); ALL -> inline every layout's geometry. */
+        if (mode == cormoran_fast_keymap_LayoutDetailsMode_LAYOUT_DETAILS_ALL) {
+            summary.keys.funcs.encode = encode_layout_keys;
+            summary.keys.arg = (void *)l;
+        }
+
+        if (!pb_encode_submessage(stream, &cormoran_fast_keymap_PhysicalLayoutSummary_msg,
+                                  &summary)) {
             return false;
         }
     }
@@ -665,13 +681,53 @@ static bool encode_layouts(pb_ostream_t *stream, const pb_field_t *field, void *
     return true;
 }
 
-static int handle_get_physical_layouts(cormoran_fast_keymap_Response *resp) {
-    cormoran_fast_keymap_PhysicalLayouts *out = &resp->response_type.get_physical_layouts;
-    *out = (cormoran_fast_keymap_PhysicalLayouts)cormoran_fast_keymap_PhysicalLayouts_init_zero;
+static int handle_get_physical_layouts(cormoran_fast_keymap_LayoutDetailsMode mode,
+                                       cormoran_fast_keymap_Response *resp) {
+    fk_physical_layouts_mode = mode;
+
+    cormoran_fast_keymap_PhysicalLayoutsResponse *out = &resp->response_type.get_physical_layouts;
+    *out = (cormoran_fast_keymap_PhysicalLayoutsResponse)
+        cormoran_fast_keymap_PhysicalLayoutsResponse_init_zero;
     out->active_layout_index = zmk_physical_layouts_get_selected();
-    out->layouts.funcs.encode = encode_layouts;
+    out->layouts.funcs.encode = encode_physical_layout_summaries;
+    out->layouts.arg = &fk_physical_layouts_mode;
 
     resp->which_response_type = cormoran_fast_keymap_Response_get_physical_layouts_tag;
+    return 0;
+}
+
+/* -- get_physical_layout (single layout, geometry always populated) ---- */
+
+/* The pointer target is a static/DT-generated struct owned by ZMK's physical
+ * layout list (see zmk_physical_layouts_get_list()), so it stays valid
+ * across both encode passes without needing to copy anything -- unlike
+ * fk_layer_arg/fk_get_behaviors_req above, this is just a pointer, not
+ * request data that must be preserved. */
+static const struct zmk_physical_layout *fk_selected_physical_layout;
+
+static int handle_get_physical_layout(uint32_t layout_index, cormoran_fast_keymap_Response *resp) {
+    struct zmk_physical_layout const *const *layouts;
+    size_t layout_count = zmk_physical_layouts_get_list(&layouts);
+
+    if (layout_index >= layout_count) {
+        set_error(resp, cormoran_fast_keymap_ErrorCode_ERR_INVALID_LAYOUT);
+        return 0;
+    }
+
+    fk_selected_physical_layout = layouts[layout_index];
+
+    cormoran_fast_keymap_PhysicalLayoutResponse *out = &resp->response_type.get_physical_layout;
+    *out = (cormoran_fast_keymap_PhysicalLayoutResponse)
+        cormoran_fast_keymap_PhysicalLayoutResponse_init_zero;
+    out->index = layout_index;
+    out->has_layout = true;
+    out->layout.name.funcs.encode = encode_layout_name;
+    out->layout.name.arg = (void *)fk_selected_physical_layout;
+    out->layout.fp = fk_fp_physical_layout_one(fk_selected_physical_layout);
+    out->layout.keys.funcs.encode = encode_layout_keys;
+    out->layout.keys.arg = (void *)fk_selected_physical_layout;
+
+    resp->which_response_type = cormoran_fast_keymap_Response_get_physical_layout_tag;
     return 0;
 }
 
@@ -713,7 +769,10 @@ static bool fast_keymap_rpc_handle_request(const zmk_custom_CallRequest *raw_req
         rc = handle_get_edited_layer(req.request_type.get_edited_layer.layer_id, resp);
         break;
     case cormoran_fast_keymap_Request_get_physical_layouts_tag:
-        rc = handle_get_physical_layouts(resp);
+        rc = handle_get_physical_layouts(req.request_type.get_physical_layouts.details, resp);
+        break;
+    case cormoran_fast_keymap_Request_get_physical_layout_tag:
+        rc = handle_get_physical_layout(req.request_type.get_physical_layout.layout_index, resp);
         break;
     default:
         LOG_WRN("Unsupported fast_keymap request type: %d", req.which_request_type);
