@@ -452,7 +452,7 @@ static int handle_get_behaviors(const cormoran_fast_keymap_GetBehaviorsRequest *
 
 struct fk_layer_encode_arg {
     zmk_keymap_layer_id_t layer_id;
-#if IS_ENABLED(CONFIG_ZMK_KEYMAP_SETTINGS_STORAGE)
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER)
     bool use_default;
 #endif
 };
@@ -492,7 +492,7 @@ static bool encode_layer_bindings(pb_ostream_t *stream, const pb_field_t *field,
 
     for (uint16_t b = 0; b < binding_count; b++) {
         const struct zmk_behavior_binding *binding;
-#if IS_ENABLED(CONFIG_ZMK_KEYMAP_SETTINGS_STORAGE)
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER)
         binding = a->use_default ? zmk_stock_keymap_get_layer_binding_at_idx(a->layer_id, b)
                                  : zmk_keymap_get_layer_binding_at_idx(a->layer_id, b);
 #else
@@ -524,7 +524,7 @@ static int handle_get_layer_common(uint32_t layer_id, bool want_default,
     }
 
     fk_layer_arg.layer_id = (zmk_keymap_layer_id_t)layer_id;
-#if IS_ENABLED(CONFIG_ZMK_KEYMAP_SETTINGS_STORAGE)
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER)
     fk_layer_arg.use_default = want_default;
 #else
     ARG_UNUSED(want_default);

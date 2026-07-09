@@ -39,11 +39,11 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
  * Request, exercising the exact function Studio's RPC dispatch would call.
  *
  * Needs CONFIG_ZMK_STUDIO (a physical-layout devicetree, see tests/studio/
- * via ../test.dtsi) -- CONFIG_ZMK_STUDIO_RPC (implied) in turn selects
- * CONFIG_ZMK_KEYMAP_SETTINGS_STORAGE (see src/studio/Kconfig in the zmk
- * dependency), so zmk_keymap_set_layer_binding_at_idx() /
- * zmk_stock_keymap_get_layer_binding_at_idx() are available for the
- * edited-diff test below.
+ * via ../test.dtsi). The edited-diff test additionally needs
+ * CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER=y (tests/studio/native_sim.conf sets
+ * it), which is what gates the non-upstream
+ * zmk_stock_keymap_get_layer_binding_at_idx() accessor; without it that test
+ * is compiled out (see test_edited_diff_and_default).
  *
  * tests/studio/native_sim.keymap defines two layers over the 4-key physical
  * layout from ../test.dtsi:
@@ -1151,6 +1151,14 @@ static int test_physical_layouts(void) {
 }
 
 static int test_edited_diff_and_default(void) {
+#if !IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER)
+    /* Without CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER the stock-keymap accessor
+     * isn't compiled in and get_default_layer/get_edited_layer degrade to
+     * "default == current" (no diff); this test asserts the real diff, so it
+     * only runs when the feature is enabled (tests/studio/native_sim.conf sets
+     * it). */
+    return 0;
+#else
     cormoran_fast_keymap_Request snap_req = cormoran_fast_keymap_Request_init_zero;
     snap_req.which_request_type = cormoran_fast_keymap_Request_get_snapshot_tag;
     snap_req.request_type.get_snapshot = true;
@@ -1308,6 +1316,7 @@ static int test_edited_diff_and_default(void) {
 
     LOG_INF("PASS: fast_keymap_edited_diff_and_default");
     return 0;
+#endif /* CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER */
 }
 
 static int test_invalid_requests(void) {

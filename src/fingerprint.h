@@ -54,7 +54,7 @@ uint32_t fk_fp_behaviors(void);
 uint32_t fk_fp_behavior_def(const struct device *dev);
 
 /** default_keymap_fp: over every layer's DT-stock bindings (SS4). Equals
- * fk_fp_keymap_bindings_only() when CONFIG_ZMK_KEYMAP_SETTINGS_STORAGE is off
+ * fk_fp_keymap_bindings_only() when CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER is off
  * (no separate stock copy exists; default == current). */
 uint32_t fk_fp_default_keymap(void);
 
@@ -78,16 +78,16 @@ uint32_t fk_fp_physical_layout_one(const struct zmk_physical_layout *layout);
 uint32_t fk_fp_layer_current(zmk_keymap_layer_id_t layer_id);
 
 /** fp for one layer's DEFAULT (DT stock) bindings only. Equals
- * fk_fp_layer_current() when CONFIG_ZMK_KEYMAP_SETTINGS_STORAGE is off. */
+ * fk_fp_layer_current() when CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER is off. */
 uint32_t fk_fp_layer_default(zmk_keymap_layer_id_t layer_id);
 
 /** Number of positions where the current binding differs from the default
  * (canonical-bytes comparison) on this layer. Always 0 when
- * CONFIG_ZMK_KEYMAP_SETTINGS_STORAGE is off. */
+ * CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER is off. */
 uint16_t fk_layer_edited_count(zmk_keymap_layer_id_t layer_id);
 
 /** True if binding_idx's current binding differs from its default one. Always
- * false when CONFIG_ZMK_KEYMAP_SETTINGS_STORAGE is off. */
+ * false when CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER is off. */
 bool fk_binding_is_edited(zmk_keymap_layer_id_t layer_id, uint16_t binding_idx);
 
 /** Number of currently configured layers (ZMK_KEYMAP_LAYERS_LEN minus unused

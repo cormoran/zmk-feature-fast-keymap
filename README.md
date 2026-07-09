@@ -47,13 +47,9 @@ exporter**) is published at
 
 ## Module User Guide
 
-1. Add the module to your `config/west.yml`.
-
-   > **Requirement:** this module reads the compiled-in default keymap via ZMK's
-   > `zmk_stock_keymap_get_layer_binding_at_idx()` accessor, which currently
-   > lives on the ZMK branch
-   > `pr/main+custom-studio-protocol/expose-stock-keymap`. Point your ZMK
-   > project at that branch until it merges into `main+custom-studio-protocol`.
+1. Add the module to your `config/west.yml` (uses the standard
+   `main+custom-studio-protocol` ZMK branch — no extra patches needed for the
+   default feature set).
 
    ```yml
    manifest:
@@ -64,10 +60,10 @@ exporter**) is published at
        - name: zmk-feature-fast-keymap
          remote: cormoran
          revision: main
-       # Patched ZMK: custom Studio RPC + the stock-keymap accessor
+       # Patched ZMK: the unofficial custom Studio RPC protocol
        - name: zmk
          remote: cormoran
-         revision: pr/main+custom-studio-protocol/expose-stock-keymap
+         revision: main+custom-studio-protocol
          import:
            file: app/west.yml
    ```
@@ -87,6 +83,17 @@ exporter**) is published at
    `CONFIG_ZMK_FAST_KEYMAP_STUDIO_RPC` is `y` by default once `CONFIG_ZMK_STUDIO`
    and `CONFIG_ZMK_FAST_KEYMAP` are set. Responses stream, so no TX-buffer
    change is required.
+
+   > **Optional — default keymap / edited-only diff.** The
+   > `get_default_layer` / `get_edited_layer` methods (which let a client cache
+   > the compiled-in default keymap and fetch only edited positions) read the
+   > default keymap through ZMK's non-upstream
+   > `zmk_stock_keymap_get_layer_binding_at_idx()` accessor. They are **off by
+   > default**. To use them, set `CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER=y` **and**
+   > point the `zmk` project at a branch that has the accessor —
+   > `main+dya` or `pr/main+custom-studio-protocol/expose-stock-keymap`. With
+   > the default branch, `get_default_layer` returns the current keymap (no
+   > diff) and everything else works normally.
 
 3. Flash, open the web app above, connect (USB or BLE), and it fast-loads your
    keymap and behaviors. Use "Export .keymap" to copy a `.keymap`-style dump.

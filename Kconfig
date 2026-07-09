@@ -14,6 +14,23 @@ config ZMK_FAST_KEYMAP_STUDIO_RPC
 
 if ZMK_FAST_KEYMAP_STUDIO_RPC
 
+config ZMK_FAST_KEYMAP_DEFAULT_LAYER
+    bool "Expose the default (stock) keymap and edited-only diff"
+    depends on ZMK_KEYMAP_SETTINGS_STORAGE
+    help
+      Enables the get_default_layer / get_edited_layer RPCs and the per-layer
+      default_fp / edited_count fields in the snapshot, so a client can cache
+      the compiled-in ("stock") keymap and then fetch only the positions the
+      user actually edited.
+
+      This REQUIRES a ZMK build that provides the (non-upstream)
+      zmk_stock_keymap_get_layer_binding_at_idx() accessor -- currently the
+      cormoran/zmk branches "main+dya" or
+      "pr/main+custom-studio-protocol/expose-stock-keymap". It is therefore
+      OFF by default so the module still builds against the plain
+      "main+custom-studio-protocol" branch, where get_default_layer simply
+      returns the current keymap (no default/edited diff). See the README.
+
 config ZMK_FAST_KEYMAP_STUDIO_RPC_TEST
     bool "Enable fast-keymap Studio RPC self-test (native_sim only)"
     help

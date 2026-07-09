@@ -248,7 +248,7 @@ uint32_t fk_fp_default_keymap(void) {
         seed = crc_u8(seed, layer_id);
 
         for (uint16_t b = 0; b < binding_count; b++) {
-#if IS_ENABLED(CONFIG_ZMK_KEYMAP_SETTINGS_STORAGE)
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER)
             const struct zmk_behavior_binding *binding =
                 zmk_stock_keymap_get_layer_binding_at_idx(layer_id, b);
 #else
@@ -346,7 +346,7 @@ uint32_t fk_fp_layer_current(zmk_keymap_layer_id_t layer_id) {
 }
 
 uint32_t fk_fp_layer_default(zmk_keymap_layer_id_t layer_id) {
-#if IS_ENABLED(CONFIG_ZMK_KEYMAP_SETTINGS_STORAGE)
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER)
     uint32_t seed = 0;
     uint16_t binding_count = fk_binding_count();
 
@@ -363,7 +363,7 @@ uint32_t fk_fp_layer_default(zmk_keymap_layer_id_t layer_id) {
 }
 
 bool fk_binding_is_edited(zmk_keymap_layer_id_t layer_id, uint16_t binding_idx) {
-#if IS_ENABLED(CONFIG_ZMK_KEYMAP_SETTINGS_STORAGE)
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER)
     const struct zmk_behavior_binding *current =
         zmk_keymap_get_layer_binding_at_idx(layer_id, binding_idx);
     const struct zmk_behavior_binding *def =
@@ -380,7 +380,7 @@ bool fk_binding_is_edited(zmk_keymap_layer_id_t layer_id, uint16_t binding_idx) 
 }
 
 uint16_t fk_layer_edited_count(zmk_keymap_layer_id_t layer_id) {
-#if IS_ENABLED(CONFIG_ZMK_KEYMAP_SETTINGS_STORAGE)
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER)
     uint16_t binding_count = fk_binding_count();
     uint16_t edited = 0;
     for (uint16_t b = 0; b < binding_count; b++) {

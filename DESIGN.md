@@ -378,16 +378,24 @@ ERR_INVALID_LAYOUT`.
 
 ## 8. Config / buffers
 
-- **ZMK branch requirement.** This module calls
-  `zmk_stock_keymap_get_layer_binding_at_idx()`, which currently exists only on
-  the ZMK branch `pr/main+custom-studio-protocol/expose-stock-keymap` (the test
-  west manifest pins it). The consumer setup docs (README, Phase D) must tell
-  users to point their `config/west.yml` ZMK project at that branch until it
-  merges into `main+custom-studio-protocol`.
 - Kconfig: `ZMK_FAST_KEYMAP` (bool, main switch) and
   `ZMK_FAST_KEYMAP_STUDIO_RPC` (default y, `depends on ZMK_STUDIO`). The
   handler compiles only under the latter. Depends only on ZMK core keymap +
-  studio — no hardware, so native_sim builds and tests it.
+  studio — no hardware, so native_sim builds and tests it. **Builds against the
+  stock `main+custom-studio-protocol` ZMK branch by default.**
+- **`ZMK_FAST_KEYMAP_DEFAULT_LAYER`** (bool, **default n**, `depends on
+  ZMK_KEYMAP_SETTINGS_STORAGE`) gates the default/edited-keymap feature
+  (`get_default_layer`, `get_edited_layer`, per-layer `default_fp`/
+  `edited_count`), which calls the **non-upstream**
+  `zmk_stock_keymap_get_layer_binding_at_idx()` accessor. Off by default so the
+  module compiles on plain `main+custom-studio-protocol` (no accessor) — there
+  `get_default_layer` returns the current keymap and edits are empty (§2).
+  Enabling it requires a ZMK with the accessor: cormoran/zmk `main+dya` or
+  `pr/main+custom-studio-protocol/expose-stock-keymap`. All accessor references
+  live behind `#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER)` so the off
+  build never references the missing symbol. The test west manifest pins a
+  branch that has the accessor and the studio test enables the config, so CI
+  exercises the feature.
 - `CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE=128` (requests are tiny; this is the ZMK
   Studio default-ish bump). Requests must fit RX whole.
 - `CONFIG_ZMK_STUDIO_RPC_TX_BUF_SIZE`: this is only the streaming **staging
