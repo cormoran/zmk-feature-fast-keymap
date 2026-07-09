@@ -324,10 +324,12 @@ function BenchmarkPanel({
   call,
   ready,
   connection,
+  subsystemIndex,
 }: {
   call: FastKeymapCall;
   ready: boolean;
   connection: RpcConnection | null;
+  subsystemIndex: number;
 }) {
   const [result, setResult] = useState<BenchmarkResult | null>(null);
   const [isRunning, setIsRunning] = useState(false);
@@ -336,11 +338,11 @@ function BenchmarkPanel({
     if (!ready || !connection) return;
     setIsRunning(true);
     try {
-      setResult(await runBenchmark(call, connection));
+      setResult(await runBenchmark(call, connection, { subsystemIndex }));
     } finally {
       setIsRunning(false);
     }
-  }, [ready, connection, call]);
+  }, [ready, connection, call, subsystemIndex]);
 
   const speedup = result ? secondLoadSpeedup(result) : null;
   const byteSavings = result ? secondLoadByteSavings(result) : null;
@@ -576,6 +578,7 @@ export function FastKeymapSection() {
         call={call}
         ready={ready}
         connection={zmkApp.state.connection}
+        subsystemIndex={subsystem.index}
       />
     </section>
   );

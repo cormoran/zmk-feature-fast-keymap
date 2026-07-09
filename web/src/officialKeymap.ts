@@ -12,14 +12,11 @@
 
 import {
   call_rpc,
+  Response as StudioResponse,
   type Request,
   type RpcConnection,
 } from "@zmkfirmware/zmk-studio-ts-client";
-import {
-  Response as BehaviorsResponse,
-  type BehaviorBindingParametersSet,
-} from "@zmkfirmware/zmk-studio-ts-client/behaviors";
-import { Response as KeymapResponse } from "@zmkfirmware/zmk-studio-ts-client/keymap";
+import type { BehaviorBindingParametersSet } from "@zmkfirmware/zmk-studio-ts-client/behaviors";
 
 export interface OfficialBehavior {
   id: number;
@@ -48,13 +45,11 @@ export interface OfficialKeymapResult {
    * fingerprinting or bundling to let it skip any of them, unlike
    * fast-keymap (see DESIGN.md "Why"). */
   rpcCalls: number;
-  /** Total size, in bytes, of the RPC response payloads received during this
-   * load. ≈ payload bytes: each decoded `call_rpc()` response's SUBSYSTEM
-   * message (`behaviors`/`keymap`) is re-encoded and summed -- a faithful,
-   * consistent proxy for the data transferred, excluding the studio /
-   * RequestResponse transport envelope. Measured at the same layer as the
-   * fast-keymap path (its inner `Response`) -- see benchmark.ts's matching
-   * comment -- so the comparison is fair. */
+  /** Total size, in bytes, of the responses read during this load, measured
+   * at the OUTER transport level: each decoded `call_rpc()` response re-encoded
+   * as the full `zmk.studio.Response` frame it travels in, summed. Measured at
+   * the same whole-message layer as the fast-keymap path -- see benchmark.ts's
+   * matching comment -- so the comparison is fair. */
   readBytes: number;
 }
 
@@ -108,16 +103,13 @@ export async function loadOfficialKeymap(
   const call = async (request: Omit<Request, "requestId">) => {
     rpcCalls++;
     const response = await call_rpc(connection, request);
-    // Count the SUBSYSTEM response payload only (the behaviors/keymap
-    // message), so this matches the fast-keymap path -- which measures its
-    // inner `Response` -- rather than the generic studio/RequestResponse
-    // transport envelope both protocols equally incur. Keeping both at the
-    // same layer is what makes the byte comparison fair.
-    if (response.behaviors) {
-      readBytes += BehaviorsResponse.encode(response.behaviors).finish().length;
-    } else if (response.keymap) {
-      readBytes += KeymapResponse.encode(response.keymap).finish().length;
-    }
+    // Outer count: `call_rpc()` returns the decoded `RequestResponse`; re-wrap
+    // it in the full `zmk.studio.Response` frame it travels in, so this matches
+    // the fast-keymap path's whole-`zmk.studio.Response` count (benchmark.ts).
+    // requestId zeroed (omitted on the wire) to match the fast-keymap side.
+    readBytes += StudioResponse.encode({
+      requestResponse: { ...response, requestId: 0 },
+    }).finish().length;
     return response;
   };
 

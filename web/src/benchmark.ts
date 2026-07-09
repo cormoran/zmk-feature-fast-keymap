@@ -13,19 +13,23 @@ import {
   type FastKeymapCall,
 } from "zmk-feature-fast-keymap";
 import { isUnlockRequiredError } from "@cormoran/zmk-studio-react-hook";
-import type { RpcConnection } from "@zmkfirmware/zmk-studio-ts-client";
+import {
+  Response as StudioResponse,
+  type RpcConnection,
+} from "@zmkfirmware/zmk-studio-ts-client";
 import { loadOfficialKeymap, OfficialKeymapError } from "./officialKeymap";
 
 export interface BenchmarkMeasurement {
   ms: number;
   rpcCalls: number;
-  /** Total size, in bytes, of the RPC responses received during this load.
-   * ≈ response payload bytes: each decoded response is re-encoded (protobuf
-   * encoding is deterministic, and both paths omit default/empty fields the
-   * same way) and summed -- a faithful, consistent proxy for what actually
-   * crossed the wire, excluding RPC framing. Measured the same way on both
-   * the fast-keymap path (below) and the official path
-   * (officialKeymap.ts's `loadOfficialKeymap`), so the comparison is fair. */
+  /** Total size, in bytes, of the responses read during this load, measured
+   * at the OUTER transport level: the full `zmk.studio.Response` frame each
+   * reply travels in. The official path re-encodes the `RequestResponse`
+   * `call_rpc()` returns; the fast-keymap path re-wraps its decoded response
+   * as the custom-subsystem payload inside the same `zmk.studio.Response`
+   * envelope (see measureFastKeymap). Both are therefore counted at the same
+   * (whole-message) layer -- a faithful, consistent proxy for what actually
+   * crosses the wire, excluding only the low-level SOF/EOF framing. */
   readBytes: number;
   /** Set when this measurement's load failed -- the benchmark still
    * reports the other measurements rather than aborting entirely. */
@@ -51,6 +55,11 @@ export interface RunBenchmarkOptions {
    * `LoadFastKeymapOptions.deviceKey`. Only affects the *contents* of the
    * isolated benchmark storage (see below), not the real cache. */
   deviceKey?: string;
+  /** The connected fast-keymap custom-subsystem index (from
+   * `useCustomSubsystem().subsystem.index`). Used only to reconstruct the
+   * outer `zmk.studio.Response` envelope for the byte count; defaults to 0
+   * (its almost-always value, and a zero index is omitted on the wire). */
+  subsystemIndex?: number;
 }
 
 function errorMessage(err: unknown): string {
@@ -94,7 +103,8 @@ class MemoryStorage implements Storage {
 async function measureFastKeymap(
   call: FastKeymapCall,
   storage: Storage,
-  deviceKey: string
+  deviceKey: string,
+  subsystemIndex: number
 ): Promise<BenchmarkMeasurement> {
   let rpcCalls = 0;
   let readBytes = 0;
@@ -102,7 +112,18 @@ async function measureFastKeymap(
     rpcCalls++;
     const response = await call(request);
     if (response) {
-      readBytes += FastKeymapResponse.encode(response).finish().length;
+      // Outer count: the fast-keymap payload rides inside a custom-subsystem
+      // CallResponse inside a zmk.studio.Response -- re-wrap it the same way
+      // so this matches the official path's whole-`zmk.studio.Response` count.
+      const payload = FastKeymapResponse.encode(response).finish();
+      readBytes += StudioResponse.encode({
+        // requestId 0 (omitted on the wire) here and on the official side, so
+        // the per-call request-id framing doesn't skew the comparison.
+        requestResponse: {
+          requestId: 0,
+          custom: { call: { subsystemIndex, payload } },
+        },
+      }).finish().length;
     }
     return response;
   };
@@ -176,17 +197,20 @@ export async function runBenchmark(
   options: RunBenchmarkOptions = {}
 ): Promise<BenchmarkResult> {
   const deviceKey = options.deviceKey ?? "benchmark-device";
+  const subsystemIndex = options.subsystemIndex ?? 0;
   const storage = new MemoryStorage();
 
   const fastInitial = await measureFastKeymap(
     fastKeymapCall,
     storage,
-    deviceKey
+    deviceKey,
+    subsystemIndex
   );
   const fastSecond = await measureFastKeymap(
     fastKeymapCall,
     storage,
-    deviceKey
+    deviceKey,
+    subsystemIndex
   );
 
   const officialInitial = await measureOfficial(connection);
