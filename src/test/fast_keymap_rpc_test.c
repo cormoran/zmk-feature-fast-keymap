@@ -767,6 +767,43 @@ static int test_list_behaviors_modes_and_def_fp(void) {
         return -EINVAL;
     }
 
+    /* def_fp determinism under caching: a second, independent list_behaviors
+     * call must report exactly the same per-behavior def_fp as the first --
+     * this is the property the memoized fk_fp_behavior_def() cache
+     * (fingerprint.c) must preserve, since a stale/inconsistent cached
+     * def_fp would silently break the web's cache-key comparisons. */
+    static behavior_summary_capture_t none_cap2;
+    none_cap2 = (behavior_summary_capture_t){0};
+    if (!call_list_behaviors(cormoran_fast_keymap_BehaviorDetailsMode_BEHAVIOR_DETAILS_NONE,
+                             &none_cap2)) {
+        return -EINVAL;
+    }
+    if (none_cap2.count != none_cap.count) {
+        LOG_ERR("list_behaviors(NONE) behavior count not stable across calls (%u vs %u)",
+                (unsigned int)none_cap.count, (unsigned int)none_cap2.count);
+        return -EINVAL;
+    }
+    for (size_t i = 0; i < none_cap.count; i++) {
+        const struct behavior_summary_entry *e = &none_cap.entries[i];
+        bool found = false;
+        for (size_t j = 0; j < none_cap2.count; j++) {
+            if (none_cap2.entries[j].local_id == e->local_id) {
+                found = true;
+                if (none_cap2.entries[j].def_fp != e->def_fp) {
+                    LOG_ERR("def_fp for local_id %u not stable across list_behaviors calls (%u "
+                            "vs %u)",
+                            e->local_id, e->def_fp, none_cap2.entries[j].def_fp);
+                    return -EINVAL;
+                }
+                break;
+            }
+        }
+        if (!found) {
+            LOG_ERR("local_id %u missing from second list_behaviors(NONE) call", e->local_id);
+            return -EINVAL;
+        }
+    }
+
     /* NONE: no summary carries inline details. */
     for (size_t i = 0; i < none_cap.count; i++) {
         if (none_cap.entries[i].has_details) {
@@ -1181,6 +1218,17 @@ static int test_edited_diff_and_default(void) {
         return -EINVAL;
     }
 
+    /* Capture every behavior's def_fp before the edit -- def_fp/behaviors_fp
+     * are memoized (fingerprint.c) because they're immutable (compile-time
+     * behavior metadata, independent of the keymap), so editing a keymap
+     * binding below must NOT perturb them. */
+    static behavior_summary_capture_t before_behaviors;
+    before_behaviors = (behavior_summary_capture_t){0};
+    if (!call_list_behaviors(cormoran_fast_keymap_BehaviorDetailsMode_BEHAVIOR_DETAILS_ALL,
+                             &before_behaviors)) {
+        return -EINVAL;
+    }
+
     /* Edit layer 0, position 0 (originally `&kp A`) to a different keycode
      * value directly through the ZMK keymap API -- this module is read-only
      * and never edits the keymap itself, but the underlying RPC-editable
@@ -1212,6 +1260,55 @@ static int test_edited_diff_and_default(void) {
     if (!after_l0) {
         LOG_ERR("layer 0 missing from snapshot after edit");
         return -EINVAL;
+    }
+
+    /* Cache-correctness property: behaviors_fp and every behavior's def_fp
+     * are immutable (they don't depend on the keymap), so they must NOT
+     * change just because the memoized def_fp/behaviors_fp caches
+     * (fingerprint.c) happen to have been filled before this edit. A stale
+     * OR an incorrectly-invalidated cache would both show up here: stale ->
+     * wrong value if a real change should have propagated (not applicable
+     * to these truly-immutable fps); incorrectly invalidated -> value
+     * changes when it shouldn't. */
+    if (before.response_type.snapshot.behaviors_fp != after.response_type.snapshot.behaviors_fp) {
+        LOG_ERR("behaviors_fp changed after editing a keymap binding (should be immutable): "
+                "before=%u after=%u",
+                before.response_type.snapshot.behaviors_fp,
+                after.response_type.snapshot.behaviors_fp);
+        return -EINVAL;
+    }
+
+    static behavior_summary_capture_t after_behaviors;
+    after_behaviors = (behavior_summary_capture_t){0};
+    if (!call_list_behaviors(cormoran_fast_keymap_BehaviorDetailsMode_BEHAVIOR_DETAILS_ALL,
+                             &after_behaviors)) {
+        return -EINVAL;
+    }
+    if (after_behaviors.count != before_behaviors.count) {
+        LOG_ERR("list_behaviors behavior count changed after editing a keymap binding (%u vs %u)",
+                (unsigned int)before_behaviors.count, (unsigned int)after_behaviors.count);
+        return -EINVAL;
+    }
+    for (size_t i = 0; i < before_behaviors.count; i++) {
+        const struct behavior_summary_entry *b = &before_behaviors.entries[i];
+        bool found = false;
+        for (size_t j = 0; j < after_behaviors.count; j++) {
+            if (after_behaviors.entries[j].local_id == b->local_id) {
+                found = true;
+                if (after_behaviors.entries[j].def_fp != b->def_fp) {
+                    LOG_ERR("def_fp for local_id %u changed after editing a keymap binding "
+                            "(should be immutable): before=%u after=%u",
+                            b->local_id, b->def_fp, after_behaviors.entries[j].def_fp);
+                    return -EINVAL;
+                }
+                break;
+            }
+        }
+        if (!found) {
+            LOG_ERR("local_id %u missing from list_behaviors after editing a keymap binding",
+                    b->local_id);
+            return -EINVAL;
+        }
     }
 
     if (before.response_type.snapshot.keymap_fp == after.response_type.snapshot.keymap_fp) {

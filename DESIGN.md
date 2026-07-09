@@ -157,9 +157,20 @@ except as the resulting `u32`. Computed on demand (cheap; a few hundred
 bindings = microseconds), no persistence.
 
 Canonicalization must be **identical in firmware and in the web bundle** for
-the groups the web reproduces locally (`behaviors_fp` and per-behavior
-`def_fp`). Freeze the exact byte layout here and bump `FK_DEFINITION_VERSION`
-on any change.
+the one group the web actually reproduces locally: per-behavior `def_fp`
+(the web recomputes it from a `BehaviorDetails` response to check it against
+its bundle/per-device cache — §5). Freeze `def_fp`'s exact byte layout here
+and bump `FK_DEFINITION_VERSION` on any change.
+
+Every other fp below (`behaviors_fp`, `default_keymap_fp`, `keymap_fp`,
+per-layer `fp`/`default_fp`, per-layout physical `fp`, `physical_layout_fp`)
+is an **opaque, device-computed cache key**: the web only ever *compares* a
+freshly reported value against the one it cached from a previous load
+(`cached.fp === snapshot.xFp`) — it never reconstructs these from raw data.
+That makes their exact byte layout a firmware-internal implementation
+detail, free to change (e.g. for memoization, see `src/fingerprint.c`)
+without a `FK_DEFINITION_VERSION` bump, as long as the fp stays a pure,
+deterministic function of the data it's meant to key.
 
 Canonical binding bytes (used by the keymap fps): `i32 behavior_local_id`
 (LE; `-1` when `behavior_dev == NULL`), `u32 param1` (LE), `u32 param2` (LE).
@@ -184,23 +195,37 @@ Groups:
   renamed alias and could not identify which behavior a shared metadata hash
   belonged to.)
 - **`behaviors_fp`** — over all behaviors in ascending `local_id` order; for
-  each append `u16 local_id`, then that behavior's `def_fp`-preimage bytes
-  (metadata + `str16 alias` + `str16 display_name`, as-served). Whole-set cache
-  key: a match lets the client skip the entire behavior fetch.
+  each append `u16 local_id`, then `u32 def_fp` (that behavior's already-computed
+  `def_fp`, §5 — not its raw preimage bytes). Whole-set cache key: a match lets
+  the client skip the entire behavior fetch. Composing from `def_fp` (rather
+  than re-hashing the metadata/alias/display_name preimage) lets the firmware
+  memoize `def_fp` per behavior and reuse it here, computing each behavior's
+  metadata preimage at most once per boot regardless of how many times
+  `list_behaviors`/`get_snapshot` run. This is purely an internal
+  recomposition — `behaviors_fp` is opaque to the web (see above), so it
+  needs no `FK_DEFINITION_VERSION` bump.
 - **`default_keymap_fp`** — over every layer (index order): `u8 layer_id` then,
   for each `binding_idx` in `0..binding_count`, the canonical binding bytes of
-  `zmk_stock_keymap_get_layer_binding_at_idx(...)`. Changes only on reflash.
+  `zmk_stock_keymap_get_layer_binding_at_idx(...)`. Under
+  `CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER`, this depends on the ACTIVE physical
+  layout (it applies that layout's position map) — the firmware memoizes it,
+  invalidated on active-layout switch (rare); see `src/fingerprint.c`.
 - **per-layer `fp` / `default_fp`** (in the Snapshot `LayerFingerprint`) — the
   same, for one layer's current vs default bindings, so the client fetches only
-  layers whose `fp` changed.
+  layers whose `fp` changed. `default_fp` is memoized per layer the same way as
+  `default_keymap_fp` above; the current `fp` is always recomputed (mutable —
+  changes on keymap edits).
 - **`keymap_fp`** — over all layers' current bindings + layer names + active
-  physical-layout index. One "did anything in the keymap change" key.
+  physical-layout index. One "did anything in the keymap change" key. Always
+  recomputed (mutable — changes on keymap edits and layout switches).
 - **per-layout physical `fp`** (in `PhysicalLayoutSummary`) — over one layout's
   `str16 name` + `u16 key_count` + per key `i16 width,height,x,y,r,rx,ry`.
-  Device-opaque (the web caches+compares it, never recomputes it).
+  Device-opaque (the web caches+compares it, never recomputes it). Compile-time
+  constant per layout — memoized forever, keyed by the layout pointer.
 - **`physical_layout_fp`** — over `u8 active_layout_index` then, per layout, that
   layout's per-layout-`fp`-preimage bytes (name + keys, as above). Whole-set
-  skip key.
+  skip key. Includes the active layout index (mutable), so always recomputed;
+  cheap since layout counts are small.
 
 ## 5. Behaviors: slim list + on-demand details (minimize redundant transport)
 

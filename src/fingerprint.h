@@ -43,19 +43,30 @@ uint16_t fk_binding_count(void);
 /** crc32 over a single canonical binding (12 bytes), chained from `seed`. */
 uint32_t fk_crc_binding(uint32_t seed, const struct zmk_behavior_binding *binding);
 
-/** behaviors_fp: over all behaviors in ascending local_id order (SS4). */
+/** behaviors_fp: crc32 over all behaviors in ascending local_id order; for
+ * each, `u16le local_id` + `u32le def_fp` (fk_fp_behavior_def(), memoized --
+ * see fingerprint.c). Opaque device-computed cache key: the web only ever
+ * compares it, never reproduces it locally, so this composition (which
+ * differs from the raw def_fp-preimage concatenation described in older
+ * design notes) needs no FK_DEFINITION_VERSION bump. Memoized forever after
+ * first call (immutable once local_ids settle post settings_load). */
 uint32_t fk_fp_behaviors(void);
 
 /** def_fp for a single behavior device (SS4/SS5): the canonical metadata
  * bytes (SS5) + `str16 alias` + `str16 display_name`, using the AS-SERVED
  * strings (fk_behavior_served_alias() / fk_behavior_display_name()) -- the
  * exact strings BehaviorDetails puts on the wire, so the client can
- * recompute this from a details response and it matches. */
+ * recompute this from a details response and it matches. Immutable
+ * (compile-time metadata/alias/display_name only) -- memoized forever,
+ * keyed by `dev` (fingerprint.c). */
 uint32_t fk_fp_behavior_def(const struct device *dev);
 
 /** default_keymap_fp: over every layer's DT-stock bindings (SS4). Equals
  * fk_fp_keymap_bindings_only() when CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER is off
- * (no separate stock copy exists; default == current). */
+ * (no separate stock copy exists; default == current). Under
+ * CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER, memoized and invalidated whenever the
+ * active physical layout changes (fingerprint.c); the #else fallback is
+ * always recomputed (it just mirrors the current, mutable keymap). */
 uint32_t fk_fp_default_keymap(void);
 
 /** keymap_fp: over all layers' current bindings + layer names + the active
@@ -70,15 +81,22 @@ uint32_t fk_fp_physical_layout(void);
  * when CONFIG_ZMK_PHYSICAL_LAYOUT_KEY_ROTATION is off). Device-opaque -- the
  * web caches+compares it, never recomputes it. Shares its preimage with
  * fk_fp_physical_layout() (the whole-set fp), so a per-layout fp and the
- * corresponding entry inside the whole-set fp can never disagree. */
+ * corresponding entry inside the whole-set fp can never disagree. Immutable
+ * (compile-time layout geometry) -- memoized forever, keyed by `layout`
+ * (fingerprint.c). */
 uint32_t fk_fp_physical_layout_one(const struct zmk_physical_layout *layout);
 
 /** fp for one layer's CURRENT bindings only (no layer_id/name prefix -- the
- * LayerFingerprint message already carries `id` separately). */
+ * LayerFingerprint message already carries `id` separately). Mutable
+ * (changes on keymap edits and active-layout switches) -- always
+ * recomputed, never cached. */
 uint32_t fk_fp_layer_current(zmk_keymap_layer_id_t layer_id);
 
 /** fp for one layer's DEFAULT (DT stock) bindings only. Equals
- * fk_fp_layer_current() when CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER is off. */
+ * fk_fp_layer_current() when CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER is off
+ * (always recomputed in that case). Under
+ * CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER, memoized per layer_id and
+ * invalidated whenever the active physical layout changes (fingerprint.c). */
 uint32_t fk_fp_layer_default(zmk_keymap_layer_id_t layer_id);
 
 /** Number of positions where the current binding differs from the default
