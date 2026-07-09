@@ -12,6 +12,7 @@
 
 import {
   call_rpc,
+  Response as StudioResponse,
   type Request,
   type RpcConnection,
 } from "@zmkfirmware/zmk-studio-ts-client";
@@ -44,6 +45,14 @@ export interface OfficialKeymapResult {
    * fingerprinting or bundling to let it skip any of them, unlike
    * fast-keymap (see DESIGN.md "Why"). */
   rpcCalls: number;
+  /** Total size, in bytes, of the RPC responses received during this load.
+   * ≈ response payload bytes: each decoded `call_rpc()` response is
+   * re-encoded (as the ts-client's top-level `Response` message, the shape
+   * actually sent over the wire) and summed -- a faithful, consistent proxy
+   * for the transport payload, excluding RPC framing. Measured the same way
+   * as the fast-keymap path -- see benchmark.ts's matching comment -- so the
+   * comparison is fair. */
+  readBytes: number;
 }
 
 /**
@@ -55,12 +64,14 @@ export interface OfficialKeymapResult {
  */
 export class OfficialKeymapError extends Error {
   readonly rpcCalls: number;
+  readonly readBytes: number;
   readonly cause: unknown;
 
-  constructor(rpcCalls: number, cause: unknown) {
+  constructor(rpcCalls: number, readBytes: number, cause: unknown) {
     super(cause instanceof Error ? cause.message : String(cause));
     this.name = "OfficialKeymapError";
     this.rpcCalls = rpcCalls;
+    this.readBytes = readBytes;
     this.cause = cause;
     Object.setPrototypeOf(this, OfficialKeymapError.prototype);
   }
@@ -89,10 +100,19 @@ export async function loadOfficialKeymap(
   connection: RpcConnection
 ): Promise<OfficialKeymapResult> {
   let rpcCalls = 0;
+  let readBytes = 0;
 
   const call = async (request: Omit<Request, "requestId">) => {
     rpcCalls++;
-    return call_rpc(connection, request);
+    const response = await call_rpc(connection, request);
+    // ≈ response payload bytes -- see this file's `readBytes` doc comment
+    // above. `call_rpc()` returns the decoded `RequestResponse`; re-wrap it
+    // in the top-level `Response` message (the shape actually sent over the
+    // wire) before re-encoding.
+    readBytes += StudioResponse.encode({
+      requestResponse: response,
+    }).finish().length;
+    return response;
   };
 
   try {
@@ -127,8 +147,8 @@ export async function loadOfficialKeymap(
       })),
     }));
 
-    return { behaviors, layers, rpcCalls };
+    return { behaviors, layers, rpcCalls, readBytes };
   } catch (err) {
-    throw new OfficialKeymapError(rpcCalls, err);
+    throw new OfficialKeymapError(rpcCalls, readBytes, err);
   }
 }

@@ -17,6 +17,10 @@ import { runBenchmark } from "../src/benchmark";
 jest.mock("@zmkfirmware/zmk-studio-ts-client", () => ({
   create_rpc_connection: jest.fn(),
   call_rpc: jest.fn(),
+  // Real `Response` (not mocked) -- officialKeymap.ts's readBytes tracking
+  // re-encodes each response via `Response.encode()`, so this needs the
+  // actual generated protobuf encoder, not a jest.fn() stub.
+  Response: jest.requireActual("@zmkfirmware/zmk-studio-ts-client").Response,
   MetaError: class MetaError extends Error {
     condition: number;
     constructor(condition: number) {
@@ -194,8 +198,8 @@ describe("runBenchmark", () => {
       deviceKey: "test-device",
     });
 
-    // Shape: four measurements, each with a numeric ms and rpcCalls, no
-    // errors on this happy path.
+    // Shape: four measurements, each with a numeric ms, rpcCalls, and
+    // readBytes, no errors on this happy path.
     for (const measurement of [
       result.fastKeymap.initial,
       result.fastKeymap.second,
@@ -204,6 +208,7 @@ describe("runBenchmark", () => {
     ]) {
       expect(typeof measurement.ms).toBe("number");
       expect(typeof measurement.rpcCalls).toBe("number");
+      expect(typeof measurement.readBytes).toBe("number");
       expect(measurement.error).toBeUndefined();
     }
 
@@ -218,11 +223,28 @@ describe("runBenchmark", () => {
       result.fastKeymap.initial.rpcCalls
     );
 
+    // The same cache-hit effect, in bytes: fast-keymap's 2nd load reads
+    // strictly fewer response bytes than its initial (cold) load, since it
+    // skips most of the round-trips the initial load needed.
+    expect(result.fastKeymap.initial.readBytes).toBeGreaterThan(0);
+    expect(result.fastKeymap.second.readBytes).toBeGreaterThan(0);
+    expect(result.fastKeymap.second.readBytes).toBeLessThan(
+      result.fastKeymap.initial.readBytes
+    );
+
     // The official path has no client cache: both loads should cost the
     // same number of round-trips (list_all_behaviors + get_behavior_details
     // + get_keymap = 3 here), unlike fast-keymap's 2nd load above.
     expect(result.official.initial.rpcCalls).toBe(3);
     expect(result.official.second.rpcCalls).toBe(3);
+
+    // ...and, since it re-fetches the exact same data every time, the exact
+    // same number of response bytes too -- unlike fast-keymap's 2nd load
+    // above.
+    expect(result.official.initial.readBytes).toBeGreaterThan(0);
+    expect(result.official.initial.readBytes).toBe(
+      result.official.second.readBytes
+    );
   });
 
   it("reports the official path's unlock requirement without failing the fast-keymap measurements", async () => {

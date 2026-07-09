@@ -7,7 +7,11 @@
 // Lives in the app (not the zmk-feature-fast-keymap package) because it
 // drives the transport-coupled official loader (officialKeymap.ts).
 
-import { loadFastKeymap, type FastKeymapCall } from "zmk-feature-fast-keymap";
+import {
+  loadFastKeymap,
+  Response as FastKeymapResponse,
+  type FastKeymapCall,
+} from "zmk-feature-fast-keymap";
 import { isUnlockRequiredError } from "@cormoran/zmk-studio-react-hook";
 import type { RpcConnection } from "@zmkfirmware/zmk-studio-ts-client";
 import { loadOfficialKeymap, OfficialKeymapError } from "./officialKeymap";
@@ -15,6 +19,14 @@ import { loadOfficialKeymap, OfficialKeymapError } from "./officialKeymap";
 export interface BenchmarkMeasurement {
   ms: number;
   rpcCalls: number;
+  /** Total size, in bytes, of the RPC responses received during this load.
+   * ≈ response payload bytes: each decoded response is re-encoded (protobuf
+   * encoding is deterministic, and both paths omit default/empty fields the
+   * same way) and summed -- a faithful, consistent proxy for what actually
+   * crossed the wire, excluding RPC framing. Measured the same way on both
+   * the fast-keymap path (below) and the official path
+   * (officialKeymap.ts's `loadOfficialKeymap`), so the comparison is fair. */
+  readBytes: number;
   /** Set when this measurement's load failed -- the benchmark still
    * reports the other measurements rather than aborting entirely. */
   error?: string;
@@ -85,19 +97,25 @@ async function measureFastKeymap(
   deviceKey: string
 ): Promise<BenchmarkMeasurement> {
   let rpcCalls = 0;
-  const countingCall: FastKeymapCall = (request) => {
+  let readBytes = 0;
+  const countingCall: FastKeymapCall = async (request) => {
     rpcCalls++;
-    return call(request);
+    const response = await call(request);
+    if (response) {
+      readBytes += FastKeymapResponse.encode(response).finish().length;
+    }
+    return response;
   };
 
   const start = performance.now();
   try {
     await loadFastKeymap(countingCall, { deviceKey, storage });
-    return { ms: performance.now() - start, rpcCalls };
+    return { ms: performance.now() - start, rpcCalls, readBytes };
   } catch (err) {
     return {
       ms: performance.now() - start,
       rpcCalls,
+      readBytes,
       error: errorMessage(err),
       unlockRequired: isUnlockRequiredError(err),
     };
@@ -110,13 +128,18 @@ async function measureOfficial(
   const start = performance.now();
   try {
     const result = await loadOfficialKeymap(connection);
-    return { ms: performance.now() - start, rpcCalls: result.rpcCalls };
+    return {
+      ms: performance.now() - start,
+      rpcCalls: result.rpcCalls,
+      readBytes: result.readBytes,
+    };
   } catch (err) {
     const ms = performance.now() - start;
     if (err instanceof OfficialKeymapError) {
       return {
         ms,
         rpcCalls: err.rpcCalls,
+        readBytes: err.readBytes,
         error: errorMessage(err.cause),
         unlockRequired: isUnlockRequiredError(err.cause),
       };
@@ -127,6 +150,7 @@ async function measureOfficial(
     return {
       ms,
       rpcCalls: 0,
+      readBytes: 0,
       error: errorMessage(err),
       unlockRequired: isUnlockRequiredError(err),
     };

@@ -23,6 +23,11 @@ import { LockState } from "@zmkfirmware/zmk-studio-ts-client/core";
 jest.mock("@zmkfirmware/zmk-studio-ts-client", () => ({
   create_rpc_connection: jest.fn(),
   call_rpc: jest.fn(),
+  // Real `Response` (not mocked) -- officialKeymap.ts's readBytes tracking
+  // (exercised here through the Benchmark panel's "Run Benchmark" click)
+  // re-encodes each response via `Response.encode()`, so this needs the
+  // actual generated protobuf encoder, not a jest.fn() stub.
+  Response: jest.requireActual("@zmkfirmware/zmk-studio-ts-client").Response,
   MetaError: class MetaError extends Error {
     condition: number;
     constructor(condition: number) {
@@ -507,6 +512,15 @@ describe("FastKeymapSection", () => {
           screen.getByRole("cell", { name: "📡 official RPC" })
         ).toBeInTheDocument();
       });
+
+      // The "Read bytes" column renders too, with human-readable, nonzero
+      // byte counts for both loaders.
+      expect(
+        screen.getByRole("columnheader", { name: /Read bytes/i })
+      ).toBeInTheDocument();
+      expect(
+        screen.getAllByText(/\d+(\.\d+)? (B|KB) \/ \d+(\.\d+)? (B|KB)/)
+      ).not.toHaveLength(0);
     });
 
     it("surfaces the unlock message instead of crashing when the official path is locked", async () => {

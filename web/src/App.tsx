@@ -267,6 +267,14 @@ function formatMeasurement(measurement: BenchmarkMeasurement): string {
   return `${measurement.ms.toFixed(1)} ms`;
 }
 
+/** Formats a byte count human-readably for the benchmark table, e.g.
+ * `"820 B"` / `"1.2 KB"`. Kept simple -- keymap-load payloads are small, so
+ * there's no need for MB+ precision or binary-prefix pedantry. */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  return `${(bytes / 1024).toFixed(1)} KB`;
+}
+
 function BenchmarkRow({ label, run }: { label: string; run: BenchmarkRun }) {
   return (
     <tr>
@@ -275,6 +283,10 @@ function BenchmarkRow({ label, run }: { label: string; run: BenchmarkRun }) {
       <td>{formatMeasurement(run.second)}</td>
       <td>
         {run.initial.rpcCalls} / {run.second.rpcCalls}
+      </td>
+      <td>
+        {formatBytes(run.initial.readBytes)} /{" "}
+        {formatBytes(run.second.readBytes)}
       </td>
     </tr>
   );
@@ -288,6 +300,18 @@ function secondLoadSpeedup(result: BenchmarkResult): number | null {
   if (fastKeymap.second.error || official.second.error) return null;
   if (fastKeymap.second.ms <= 0) return null;
   return official.second.ms / fastKeymap.second.ms;
+}
+
+/** Computes how many fewer bytes fast-keymap's 2nd load read than its
+ * initial load, as a percentage -- highlights the fingerprint cache's
+ * transport-size savings alongside the time speedup above. `null` when the
+ * 2nd load isn't a clean success or read no bytes to begin with (nothing
+ * meaningful to compare then). */
+function secondLoadByteSavings(result: BenchmarkResult): number | null {
+  const { initial, second } = result.fastKeymap;
+  if (initial.error || second.error) return null;
+  if (initial.readBytes <= 0) return null;
+  return (1 - second.readBytes / initial.readBytes) * 100;
 }
 
 /**
@@ -319,6 +343,7 @@ function BenchmarkPanel({
   }, [ready, connection, call]);
 
   const speedup = result ? secondLoadSpeedup(result) : null;
+  const byteSavings = result ? secondLoadByteSavings(result) : null;
 
   return (
     <div className="card benchmark-panel">
@@ -349,6 +374,7 @@ function BenchmarkPanel({
               <th>Initial load</th>
               <th>2nd load</th>
               <th>RPC round-trips (initial / 2nd)</th>
+              <th>Read bytes (initial / 2nd)</th>
             </tr>
           </thead>
           <tbody>
@@ -362,6 +388,13 @@ function BenchmarkPanel({
         <p className="badge badge-cache">
           ⚡ fast-keymap's 2nd load was {speedup.toFixed(1)}x faster than the
           official path's 2nd load
+        </p>
+      )}
+
+      {byteSavings !== null && (
+        <p className="badge badge-cache">
+          ⚡ fast-keymap's 2nd load read {byteSavings.toFixed(0)}% fewer bytes
+          than its initial load
         </p>
       )}
 
