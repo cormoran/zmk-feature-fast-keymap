@@ -1,0 +1,31 @@
+{
+  "name": "zmk-feature-fast-keymap",
+  "version": "0.1.0",
+  "description": "Transport-free RPC-data-handling + fingerprint-cache client for the ZMK Studio cormoran__fast_keymap custom subsystem.",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "generate": "buf generate",
+    "build": "npm run generate && tsc -p tsconfig.build.json"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "^2.10.2"
+  },
+  "devDependencies": {
+    "@bufbuild/buf": "^1.62.1",
+    "ts-proto": "^2.4.0",
+    "typescript": "~5.9.3"
+  }
+}

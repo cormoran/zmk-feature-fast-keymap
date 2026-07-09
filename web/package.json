@@ -3,13 +3,16 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
-    "dev": "buf generate && vite",
-    "build": "buf generate && tsc -b && vite build",
+    "dev": "npm run generate && vite",
+    "build": "npm run generate && tsc -b && vite build",
     "lint": "eslint . && prettier --check .",
     "preview": "vite preview",
-    "generate": "buf generate",
-    "test": "jest",
+    "generate": "npm run generate -w zmk-feature-fast-keymap",
+    "test": "npm run generate && jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
     "format": "prettier --write ."
@@ -18,7 +21,8 @@
     "@cormoran/zmk-studio-react-hook": "github:cormoran/react-zmk-studio#b91561dcaf0ee940cda210a5a52729d55271ee4a",
     "@zmkfirmware/zmk-studio-ts-client": "github:cormoran/zmk-studio-ts-client#custom-studio-protocol",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.0",
+    "zmk-feature-fast-keymap": "*"
   },
   "devDependencies": {
     "@bufbuild/buf": "^1.62.1",

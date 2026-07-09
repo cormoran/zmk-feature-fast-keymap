@@ -8,7 +8,12 @@ manifest:
   projects:
     - name: zmk
       remote: cormoran
-      revision: main+custom-studio-protocol
+      # TEST-ONLY revision. Consumers use plain main+custom-studio-protocol by
+      # default (see README). The tests enable CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER,
+      # which needs the non-upstream zmk_stock_keymap_get_layer_binding_at_idx()
+      # accessor, so the test ZMK is pinned to a branch that has it
+      # (expose-stock-keymap; main+dya also works).
+      revision: pr/main+custom-studio-protocol/expose-stock-keymap
       import:
         file: app/west.yml
       clone-depth: 1

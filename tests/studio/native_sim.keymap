@@ -1,1 +1,46 @@
 #include "../test.dtsi"
+
+/ {
+	behaviors {
+		/* Custom/user-defined behavior (not a ZMK built-in) -- exercises
+		 * that fk_behavior_alias() resolves node labels for behaviors the
+		 * firmware doesn't know about ahead of time, not just built-ins. */
+		myht: my_hold_tap {
+			compatible = "zmk,behavior-hold-tap";
+			#binding-cells = <2>;
+			bindings = <&kp>, <&kp>;
+			tapping-term-ms = <200>;
+			flavor = "tap-preferred";
+		};
+
+		/* Custom behavior with NO node label -- exercises the alias
+		 * fallback (fk_behavior_served_alias() -> dev->name, "my_hold_tap_nolabel")
+		 * used by both the def_fp fingerprint and the wire encoder. */
+		my_hold_tap_nolabel {
+			compatible = "zmk,behavior-hold-tap";
+			#binding-cells = <2>;
+			bindings = <&kp>, <&kp>;
+			tapping-term-ms = <150>;
+			flavor = "balanced";
+		};
+	};
+
+	keymap {
+		default_layer {
+			bindings = <
+			&kp A
+			&kp B
+			&mo 1
+			&trans
+			>;
+		};
+		layer_1 {
+			bindings = <
+			&kp C
+			&kp D
+			&myht LSHFT F
+			&trans
+			>;
+		};
+	};
+};

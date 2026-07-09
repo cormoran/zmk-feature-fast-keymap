@@ -1,10 +1,55 @@
-config ZMK_TEMPLATE_FEATURE
-    bool "Enable template feature"
+config ZMK_FAST_KEYMAP
+    bool "Enable fast-keymap feature"
 
-if ZMK_TEMPLATE_FEATURE
+if ZMK_FAST_KEYMAP
 
-config ZMK_TEMPLATE_FEATURE_STUDIO_RPC
-    bool "Enable template feature custom Studio RPC"
+config ZMK_FAST_KEYMAP_STUDIO_RPC
+    bool "Enable fast-keymap feature custom Studio RPC"
     depends on ZMK_STUDIO
+    default y
+    select CRC
+    help
+      Fingerprints (DESIGN.md SS4) are computed with crc32_ieee_update()
+      (zephyr/sys/crc.h), which lives behind CONFIG_CRC.
+
+if ZMK_FAST_KEYMAP_STUDIO_RPC
+
+config ZMK_FAST_KEYMAP_DEFAULT_LAYER
+    bool "Expose the default (stock) keymap and edited-only diff"
+    depends on ZMK_KEYMAP_SETTINGS_STORAGE
+    help
+      Enables the get_default_layer / get_edited_layer RPCs and the per-layer
+      default_fp / edited_count fields in the snapshot, so a client can cache
+      the compiled-in ("stock") keymap and then fetch only the positions the
+      user actually edited.
+
+      This REQUIRES a ZMK build that provides the (non-upstream)
+      zmk_stock_keymap_get_layer_binding_at_idx() accessor -- currently the
+      cormoran/zmk branches "main+dya" or
+      "pr/main+custom-studio-protocol/expose-stock-keymap". It is therefore
+      OFF by default so the module still builds against the plain
+      "main+custom-studio-protocol" branch, where get_default_layer simply
+      returns the current keymap (no default/edited diff). See the README.
+
+config ZMK_FAST_KEYMAP_STUDIO_RPC_TEST
+    bool "Enable fast-keymap Studio RPC self-test (native_sim only)"
+    help
+      Adds test-only init logic that drives the registered RPC handler
+      directly (no transport), exercising snapshot fingerprints, behavior
+      listing/alias resolution, get_layer, and the default/edited-layer
+      diff. Not for production builds.
+
+config ZMK_FAST_KEYMAP_FP_CACHE
+    bool "Memoize fingerprint computations in RAM"
+    default y
+    help
+      Cache the runtime-immutable fingerprint results (per-behavior def_fp,
+      behaviors_fp, the default-keymap fps, per-layout fps) the first time an
+      RPC computes them so later RPCs reuse them instead of recomputing.
+      Faster repeat loads at the cost of a little RAM for the caches. Disable
+      to always recompute and reclaim that RAM; the fingerprint values are
+      identical either way.
+
+endif # ZMK_FAST_KEYMAP_STUDIO_RPC
 
 endif

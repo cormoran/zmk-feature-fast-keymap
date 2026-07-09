@@ -7,7 +7,10 @@ import prettierConfig from "eslint-config-prettier";
 import { defineConfig, globalIgnores } from "eslint/config";
 
 export default defineConfig([
-  globalIgnores(["dist"]),
+  // "dist" (bare) only matches a top-level dist/ -- also ignore the
+  // workspace package's build output (generated .js/.d.ts, no eslint-disable
+  // pragma unlike the generated .ts source, which lints fine as-is).
+  globalIgnores(["dist", "packages/*/dist"]),
   {
     files: ["**/*.{ts,tsx}"],
     extends: [
