@@ -1,7 +1,7 @@
-# zmk-fast-keymap
+# zmk-feature-fast-keymap
 
 ![ZMK Version](https://img.shields.io/badge/ZMK-master-blue)
-[![Test](https://github.com/cormoran/zmk-fast-keymap/actions/workflows/zmk-module.yml/badge.svg?branch=main)](https://github.com/cormoran/zmk-fast-keymap/actions/workflows/zmk-module.yml) [![Devcontainer](https://github.com/cormoran/zmk-fast-keymap/actions/workflows/devcontainer.yml/badge.svg?branch=main)](https://github.com/cormoran/zmk-fast-keymap/actions/workflows/devcontainer.yml)
+[![Test](https://github.com/cormoran/zmk-feature-fast-keymap/actions/workflows/zmk-module.yml/badge.svg?branch=main)](https://github.com/cormoran/zmk-feature-fast-keymap/actions/workflows/zmk-module.yml) [![Devcontainer](https://github.com/cormoran/zmk-feature-fast-keymap/actions/workflows/devcontainer.yml/badge.svg?branch=main)](https://github.com/cormoran/zmk-feature-fast-keymap/actions/workflows/devcontainer.yml)
 
 A **read-only** ZMK [Studio](https://zmk.dev/docs/features/studio) module that
 serves your keyboard's behavior list and keymap over a custom

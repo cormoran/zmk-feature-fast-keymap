@@ -25,7 +25,7 @@
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 static struct zmk_rpc_custom_subsystem_meta fast_keymap_subsystem_meta = {
-    ZMK_RPC_CUSTOM_SUBSYSTEM_UI_URLS("https://cormoran.github.io/zmk-fast-keymap/"),
+    ZMK_RPC_CUSTOM_SUBSYSTEM_UI_URLS("https://cormoran.github.io/zmk-feature-fast-keymap/"),
     // Read-only data (behavior list + keymap); reading it isn't sensitive
     // and unsecured keeps the fast-load path fast -- no unlock round-trip.
     // The web template already implements the unlock prompt/retry flow (see

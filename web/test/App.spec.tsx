@@ -74,10 +74,10 @@ describe("App Component", () => {
       render(<App />);
 
       // Scoped to the heading role: the footer's "AI ready ZMK module
-      // template" credit line also matches a plain /zmk-fast-keymap/i
+      // template" credit line also matches a plain /zmk-feature-fast-keymap/i
       // text query.
       expect(
-        screen.getByRole("heading", { name: /zmk-fast-keymap/i })
+        screen.getByRole("heading", { name: /zmk-feature-fast-keymap/i })
       ).toBeInTheDocument();
       expect(screen.getByText(/cache-friendly keymap/i)).toBeInTheDocument();
     });
@@ -85,7 +85,7 @@ describe("App Component", () => {
     it("should render footer with repo link", () => {
       render(<App />);
 
-      // Pre-existing note: a loose `getByText(/zmk-fast-keymap/i)` here would
+      // Pre-existing note: a loose `getByText(/zmk-feature-fast-keymap/i)` here would
       // be ambiguous -- the header <h1>, the footer's plain-text repo name,
       // and the link text below all match that substring. Assert the actual
       // link elements directly instead.
@@ -96,13 +96,13 @@ describe("App Component", () => {
       // comment on it), so after initialization -- this module's actual
       // state -- only one link still reads this text.
       const links = screen.getAllByRole("link", {
-        name: "cormoran/zmk-fast-keymap",
+        name: "cormoran/zmk-feature-fast-keymap",
       });
       expect(links.length).toBe(1);
       for (const link of links) {
         expect(link).toHaveAttribute(
           "href",
-          "https://github.com/cormoran/zmk-fast-keymap"
+          "https://github.com/cormoran/zmk-feature-fast-keymap"
         );
       }
     });

@@ -152,7 +152,7 @@ describe("FastKeymapSection", () => {
       const link = screen.getByRole("link", { name: /module README/i });
       expect(link).toHaveAttribute(
         "href",
-        "https://github.com/cormoran/zmk-fast-keymap#readme"
+        "https://github.com/cormoran/zmk-feature-fast-keymap#readme"
       );
     });
   });

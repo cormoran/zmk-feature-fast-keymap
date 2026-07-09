@@ -1,4 +1,4 @@
-# zmk-fast-keymap - Web Frontend
+# zmk-feature-fast-keymap - Web Frontend
 
 This is a minimal web application template for interacting with ZMK firmware
 modules that implement custom Studio RPC subsystems.

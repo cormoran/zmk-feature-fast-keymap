@@ -39,7 +39,7 @@ export const SUBSYSTEM_IDENTIFIER = "cormoran__fast_keymap";
 // `...-with-custom-studio-rpc` repo name in a URL built from this constant --
 // the replacement targets this exact string first, which would otherwise
 // leave the owner unreplaced.
-export const GITHUB_REPO = "cormoran/zmk-fast-keymap";
+export const GITHUB_REPO = "cormoran/zmk-feature-fast-keymap";
 
 // Unlike GITHUB_REPO above, this always credits the original template
 // project, regardless of which repo this module was forked into. The
@@ -52,7 +52,7 @@ function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <h1>⚡ zmk-fast-keymap</h1>
+        <h1>⚡ zmk-feature-fast-keymap</h1>
         <p>
           Fast, cache-friendly keymap &amp; behavior viewer / .keymap exporter
         </p>
@@ -129,8 +129,8 @@ function App() {
 
       <footer className="app-footer">
         <p>
-          <strong>zmk-fast-keymap</strong> — read-only ZMK Studio keymap loader
-          &amp; exporter
+          <strong>zmk-feature-fast-keymap</strong> — read-only ZMK Studio keymap
+          loader &amp; exporter
         </p>
         <p>
           <a

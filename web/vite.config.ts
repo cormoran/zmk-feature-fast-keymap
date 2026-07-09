@@ -7,7 +7,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // https://vite.dev/config/
 export default defineConfig({
-  base: process.env.VITE_BASE ?? "/zmk-fast-keymap/",
+  base: process.env.VITE_BASE ?? "/zmk-feature-fast-keymap/",
   plugins: [react()],
   resolve: {
     alias: {
