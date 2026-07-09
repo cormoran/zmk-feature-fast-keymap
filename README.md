@@ -100,6 +100,18 @@ exporter**) is published at
 - Standard-behavior aliases/metadata are authoritative in the web bundle;
   behaviors it doesn't bundle are fetched from the device on demand.
 
+### Reusable client library
+
+The RPC-data-handling and fingerprint/caching logic is published as a
+transport-agnostic npm package, **[`zmk-feature-fast-keymap`](./web/packages/fast-keymap)**,
+so other web apps can reuse it for consistent caching. It provides the
+fingerprint canonicalization, the bundled standard-behavior definitions, and
+`loadFastKeymap()` (snapshot → cache-diff → assemble); the app supplies its own
+`call(request)` transport. See its [README](./web/packages/fast-keymap/README.md).
+
+The bundled web app also includes a **benchmark** that compares fast-keymap vs.
+ZMK's official `keymap`/`behaviors` RPC for initial and cached (2nd) loads.
+
 ### Protocol / contributor notes
 
 The fingerprint canonicalization and the definition-version bump procedure (the
