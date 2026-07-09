@@ -172,6 +172,16 @@ detail, free to change (e.g. for memoization, see `src/fingerprint.c`)
 without a `FK_DEFINITION_VERSION` bump, as long as the fp stays a pure,
 deterministic function of the data it's meant to key.
 
+The runtime-immutable fingerprints (`def_fp`, `behaviors_fp`,
+`default_keymap_fp`, per-layer `default_fp`, per-layout physical `fp`) are
+memoized in RAM the first time an RPC computes them, gated by
+`CONFIG_ZMK_FAST_KEYMAP_FP_CACHE` (default `y`; see `src/fingerprint.c` and
+its `Kconfig` help text). Disabling it recomputes every fingerprint on each
+call instead of caching, saving the cache RAM at the cost of repeat-load
+speed. This is pure memoization — the computed fingerprint VALUES are
+byte-identical whether the cache is on or off; in particular `behaviors_fp`'s
+`crc(local_id + def_fp)` composition (below) is unchanged either way.
+
 Canonical binding bytes (used by the keymap fps): `i32 behavior_local_id`
 (LE; `-1` when `behavior_dev == NULL`), `u32 param1` (LE), `u32 param2` (LE).
 

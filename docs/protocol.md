@@ -55,6 +55,12 @@ memoization, see `src/fingerprint.c`) without an `FK_DEFINITION_VERSION`
 bump, as long as each fp stays a pure, deterministic function of the data it
 keys.
 
+The "firmware memoizes it forever" / "memoized" language below refers to the
+in-RAM caching in `src/fingerprint.c`, gated by
+`CONFIG_ZMK_FAST_KEYMAP_FP_CACHE` (default `y`). With it disabled, every
+fingerprint is recomputed on each call instead of cached (saving the cache
+RAM) — the reported fp values are byte-identical either way.
+
 Groups reported in `Snapshot`:
 
 | field | canonicalization |

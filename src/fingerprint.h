@@ -49,7 +49,9 @@ uint32_t fk_crc_binding(uint32_t seed, const struct zmk_behavior_binding *bindin
  * compares it, never reproduces it locally, so this composition (which
  * differs from the raw def_fp-preimage concatenation described in older
  * design notes) needs no FK_DEFINITION_VERSION bump. Memoized forever after
- * first call (immutable once local_ids settle post settings_load). */
+ * first call (immutable once local_ids settle post settings_load) when
+ * CONFIG_ZMK_FAST_KEYMAP_FP_CACHE is on (the default); when off, always
+ * recomputed -- the fp value is identical either way. */
 uint32_t fk_fp_behaviors(void);
 
 /** def_fp for a single behavior device (SS4/SS5): the canonical metadata
@@ -58,15 +60,18 @@ uint32_t fk_fp_behaviors(void);
  * exact strings BehaviorDetails puts on the wire, so the client can
  * recompute this from a details response and it matches. Immutable
  * (compile-time metadata/alias/display_name only) -- memoized forever,
- * keyed by `dev` (fingerprint.c). */
+ * keyed by `dev` (fingerprint.c), when CONFIG_ZMK_FAST_KEYMAP_FP_CACHE is on
+ * (the default); when off, always recomputed with the identical value. */
 uint32_t fk_fp_behavior_def(const struct device *dev);
 
 /** default_keymap_fp: over every layer's DT-stock bindings (SS4). Equals
  * fk_fp_keymap_bindings_only() when CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER is off
  * (no separate stock copy exists; default == current). Under
  * CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER, memoized and invalidated whenever the
- * active physical layout changes (fingerprint.c); the #else fallback is
- * always recomputed (it just mirrors the current, mutable keymap). */
+ * active physical layout changes (fingerprint.c) when
+ * CONFIG_ZMK_FAST_KEYMAP_FP_CACHE is also on (the default); the #else
+ * fallback (either config off) is always recomputed -- the fp value is
+ * identical in every case. */
 uint32_t fk_fp_default_keymap(void);
 
 /** keymap_fp: over all layers' current bindings + layer names + the active
@@ -83,7 +88,8 @@ uint32_t fk_fp_physical_layout(void);
  * fk_fp_physical_layout() (the whole-set fp), so a per-layout fp and the
  * corresponding entry inside the whole-set fp can never disagree. Immutable
  * (compile-time layout geometry) -- memoized forever, keyed by `layout`
- * (fingerprint.c). */
+ * (fingerprint.c), when CONFIG_ZMK_FAST_KEYMAP_FP_CACHE is on (the default);
+ * when off, always recomputed with the identical value. */
 uint32_t fk_fp_physical_layout_one(const struct zmk_physical_layout *layout);
 
 /** fp for one layer's CURRENT bindings only (no layer_id/name prefix -- the
@@ -96,7 +102,9 @@ uint32_t fk_fp_layer_current(zmk_keymap_layer_id_t layer_id);
  * fk_fp_layer_current() when CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER is off
  * (always recomputed in that case). Under
  * CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER, memoized per layer_id and
- * invalidated whenever the active physical layout changes (fingerprint.c). */
+ * invalidated whenever the active physical layout changes (fingerprint.c)
+ * when CONFIG_ZMK_FAST_KEYMAP_FP_CACHE is also on (the default); with either
+ * config off, always recomputed -- the fp value is identical in every case. */
 uint32_t fk_fp_layer_default(zmk_keymap_layer_id_t layer_id);
 
 /** Number of positions where the current binding differs from the default

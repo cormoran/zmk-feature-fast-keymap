@@ -9,6 +9,15 @@ include:
     cmake-args: -DCONFIG_ZMK_STUDIO=y -DCONFIG_ZMK_FAST_KEYMAP=y -DCONFIG_ZMK_FAST_KEYMAP_STUDIO_RPC=y
     snippet: studio-rpc-usb-uart
 
+  # Keeps the CONFIG_ZMK_FAST_KEYMAP_FP_CACHE=n path (fingerprint memoization
+  # disabled -- always recompute, no cache arrays) compiled in CI; see
+  # DESIGN.md SS4 and src/fingerprint.c.
+  - artifact: fast_keymap_board_no_fp_cache
+    board: xiao_ble//zmk
+    shield: tester_xiao
+    cmake-args: -DCONFIG_ZMK_STUDIO=y -DCONFIG_ZMK_FAST_KEYMAP=y -DCONFIG_ZMK_FAST_KEYMAP_STUDIO_RPC=y -DCONFIG_ZMK_FAST_KEYMAP_FP_CACHE=n
+    snippet: studio-rpc-usb-uart
+
   - artifact: fast_keymap_board_without_rpc
     board: xiao_ble//zmk
     shield: tester_xiao

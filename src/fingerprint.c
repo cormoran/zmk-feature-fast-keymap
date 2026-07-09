@@ -213,7 +213,12 @@ static uint32_t crc_behavior_def_preimage(uint32_t seed, const struct device *de
  * (tens), so a small fixed-cap array with linear lookup/insert is simpler
  * than a hash table; if the cap is somehow exceeded we just fall back to
  * computing without caching that entry (still correct, only slower). No
- * locking needed: Studio RPCs are handled serially on one thread. */
+ * locking needed: Studio RPCs are handled serially on one thread.
+ *
+ * Gated by CONFIG_ZMK_FAST_KEYMAP_FP_CACHE (default y); when off, the cache
+ * state below doesn't exist and fk_fp_behavior_def() always recomputes --
+ * same fp value either way. */
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
 #define FK_DEF_FP_CACHE_CAP 96
 
 struct fk_def_fp_cache_entry {
@@ -242,15 +247,22 @@ static void fk_def_fp_cache_insert(const struct device *dev, uint32_t fp) {
     /* Cap exceeded (shouldn't happen on any real keyboard): silently skip
      * caching -- the caller already has the freshly computed value. */
 }
+#endif /* CONFIG_ZMK_FAST_KEYMAP_FP_CACHE */
 
 uint32_t fk_fp_behavior_def(const struct device *dev) {
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
     uint32_t cached;
     if (fk_def_fp_cache_lookup(dev, &cached)) {
         return cached;
     }
+#endif
 
     uint32_t fp = crc_behavior_def_preimage(0, dev);
+
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
     fk_def_fp_cache_insert(dev, fp);
+#endif
+
     return fp;
 }
 
@@ -277,14 +289,23 @@ uint32_t fk_fp_behavior_def(const struct device *dev) {
  * always precedes any RPC (see fast_keymap_rpc_test.c's
  * fast_keymap_rpc_test_init() for the same ordering requirement on the test
  * side) -- so once computed, the aggregate is immutable and cached forever,
- * same as the per-behavior def_fps it's built from. */
+ * same as the per-behavior def_fps it's built from.
+ *
+ * Gated by CONFIG_ZMK_FAST_KEYMAP_FP_CACHE (default y); when off, the
+ * aggregate is always recomputed by the ascending-local_id loop below (which
+ * still calls fk_fp_behavior_def(), itself uncached in that case) -- same fp
+ * value either way. */
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
 static bool fk_behaviors_fp_valid;
 static uint32_t fk_behaviors_fp_cache;
+#endif
 
 uint32_t fk_fp_behaviors(void) {
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
     if (fk_behaviors_fp_valid) {
         return fk_behaviors_fp_cache;
     }
+#endif
 
     uint32_t seed = 0;
 
@@ -315,12 +336,14 @@ uint32_t fk_fp_behaviors(void) {
         last_id = best_id;
     }
 
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
     fk_behaviors_fp_cache = seed;
     fk_behaviors_fp_valid = true;
+#endif
     return seed;
 }
 
-#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER)
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER) && IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
 /* -- default-keymap fp cache (default_keymap_fp + per-layer default_fp) --
  *
  * Both fk_fp_default_keymap() and fk_fp_layer_default() read
@@ -330,7 +353,13 @@ uint32_t fk_fp_behaviors(void) {
  * change. Guard the caches on zmk_physical_layouts_get_selected(): if it
  * differs from the index that was active when the caches were last filled,
  * invalidate (clear) them and let the next call recompute. Layout switches
- * are rare, so this only recomputes then. */
+ * are rare, so this only recomputes then.
+ *
+ * Gated additionally by CONFIG_ZMK_FAST_KEYMAP_FP_CACHE (default y); when
+ * off, this cache machinery doesn't exist and both functions always
+ * recompute from zmk_stock_keymap_get_layer_binding_at_idx() -- same fp
+ * value either way. The compute path itself stays gated on
+ * CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER alone (see below). */
 static bool fk_default_cache_layout_known;
 static int fk_default_cache_layout_index;
 
@@ -358,7 +387,7 @@ static void fk_default_cache_sync_layout(void) {
 #endif
 
 uint32_t fk_fp_default_keymap(void) {
-#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER)
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER) && IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
     fk_default_cache_sync_layout();
     if (fk_default_keymap_fp_valid) {
         return fk_default_keymap_fp_cache;
@@ -385,7 +414,7 @@ uint32_t fk_fp_default_keymap(void) {
         }
     }
 
-#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER)
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER) && IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
     fk_default_keymap_fp_cache = seed;
     fk_default_keymap_fp_valid = true;
 #endif
@@ -452,7 +481,12 @@ static uint32_t crc_physical_layout_preimage(uint32_t seed, const struct zmk_phy
  * layout's `struct zmk_physical_layout *` pointer (stable). Same small
  * fixed-cap linear-lookup pattern as the def_fp cache above; keyboards have
  * far fewer physical layouts than this cap, and an exceeded cap just falls
- * back to computing without caching (still correct). */
+ * back to computing without caching (still correct).
+ *
+ * Gated by CONFIG_ZMK_FAST_KEYMAP_FP_CACHE (default y); when off, the cache
+ * state below doesn't exist and fk_fp_physical_layout_one() always
+ * recomputes -- same fp value either way. */
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
 #define FK_LAYOUT_FP_CACHE_CAP 16
 
 struct fk_layout_fp_cache_entry {
@@ -481,15 +515,22 @@ static void fk_layout_fp_cache_insert(const struct zmk_physical_layout *layout, 
     /* Cap exceeded (shouldn't happen on any real keyboard): silently skip
      * caching -- the caller already has the freshly computed value. */
 }
+#endif /* CONFIG_ZMK_FAST_KEYMAP_FP_CACHE */
 
 uint32_t fk_fp_physical_layout_one(const struct zmk_physical_layout *layout) {
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
     uint32_t cached;
     if (fk_layout_fp_cache_lookup(layout, &cached)) {
         return cached;
     }
+#endif
 
     uint32_t fp = crc_physical_layout_preimage(0, layout);
+
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
     fk_layout_fp_cache_insert(layout, fp);
+#endif
+
     return fp;
 }
 
@@ -522,12 +563,14 @@ uint32_t fk_fp_layer_current(zmk_keymap_layer_id_t layer_id) {
 
 uint32_t fk_fp_layer_default(zmk_keymap_layer_id_t layer_id) {
 #if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER)
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
     fk_default_cache_sync_layout();
 
     bool cacheable = layer_id < ZMK_KEYMAP_LAYERS_LEN;
     if (cacheable && fk_layer_default_fp_valid[layer_id]) {
         return fk_layer_default_fp_cache[layer_id];
     }
+#endif
 
     uint32_t seed = 0;
     uint16_t binding_count = fk_binding_count();
@@ -538,10 +581,12 @@ uint32_t fk_fp_layer_default(zmk_keymap_layer_id_t layer_id) {
         seed = fk_crc_binding(seed, binding);
     }
 
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
     if (cacheable) {
         fk_layer_default_fp_cache[layer_id] = seed;
         fk_layer_default_fp_valid[layer_id] = true;
     }
+#endif
 
     return seed;
 #else

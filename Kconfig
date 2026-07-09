@@ -39,6 +39,17 @@ config ZMK_FAST_KEYMAP_STUDIO_RPC_TEST
       listing/alias resolution, get_layer, and the default/edited-layer
       diff. Not for production builds.
 
+config ZMK_FAST_KEYMAP_FP_CACHE
+    bool "Memoize fingerprint computations in RAM"
+    default y
+    help
+      Cache the runtime-immutable fingerprint results (per-behavior def_fp,
+      behaviors_fp, the default-keymap fps, per-layout fps) the first time an
+      RPC computes them so later RPCs reuse them instead of recomputing.
+      Faster repeat loads at the cost of a little RAM for the caches. Disable
+      to always recompute and reclaim that RAM; the fingerprint values are
+      identical either way.
+
 endif # ZMK_FAST_KEYMAP_STUDIO_RPC
 
 endif

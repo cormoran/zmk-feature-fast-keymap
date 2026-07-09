@@ -78,6 +78,18 @@ class WestCommandsTests(unittest.TestCase):
                     ],
                     device=[],
                 ),
+                # Keeps the fingerprint-memoization-disabled path (no cache
+                # arrays, always recompute) compiled in CI; see
+                # src/fingerprint.c.
+                "fast_keymap_board_no_fp_cache": ConfigAndDeviceTree(
+                    config=[
+                        "CONFIG_ZMK_STUDIO=y",
+                        "CONFIG_ZMK_FAST_KEYMAP=y",
+                        "CONFIG_ZMK_FAST_KEYMAP_STUDIO_RPC=y",
+                        "# CONFIG_ZMK_FAST_KEYMAP_FP_CACHE is not set",
+                    ],
+                    device=[],
+                ),
                 "fast_keymap_board_without_rpc": ConfigAndDeviceTree(
                     config=[
                         "CONFIG_ZMK_FAST_KEYMAP=y",
