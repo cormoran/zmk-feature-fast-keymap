@@ -3,7 +3,8 @@ import {
   Request,
   Response,
   FK_DEFINITION_VERSION,
-  bundledMetadataFp,
+  STANDARD_BEHAVIORS,
+  defFp,
   type FastKeymapCall,
   type Snapshot,
 } from "zmk-feature-fast-keymap";
@@ -71,15 +72,20 @@ function buildFastKeymapResponse(request: Request): Response {
     return { snapshot: SNAPSHOT };
   }
   if (request.listBehaviors) {
+    // &kp is genuinely standard, so a cold-cache DETAILS_CUSTOM request
+    // never inlines its details -- fast-keymap resolves it from the bundle
+    // by def_fp instead (mirrors FastKeymapSection.spec.tsx's fixture).
     return {
       listBehaviors: {
         behaviors: [
           {
             localId: 1,
-            alias: "kp",
-            displayName: "Key Press",
-            metadataFp: bundledMetadataFp("kp")!,
-            standard: true,
+            defFp: defFp(
+              STANDARD_BEHAVIORS.kp.alias,
+              STANDARD_BEHAVIORS.kp.displayName,
+              STANDARD_BEHAVIORS.kp.metadata
+            ),
+            details: undefined,
           },
         ],
       },

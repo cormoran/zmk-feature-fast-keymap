@@ -1,47 +1,78 @@
 import {
+  BehaviorDetailsMode,
   exportKeymapText,
   FastKeymapCacheKeys,
   loadFastKeymap,
   FK_DEFINITION_VERSION,
-  bundledMetadataFp,
-  type FastKeymapCall,
+  STANDARD_BEHAVIORS,
+  defFp,
+  type BehaviorDetails,
   type BehaviorSummary,
   type EditedBinding,
-  type GetBehaviorDetailsResponse,
+  type FastKeymapCall,
   type PhysicalLayouts,
   type Request,
   type Snapshot,
 } from "zmk-feature-fast-keymap";
 
-// -- fixture: a 2-behavior (1 bundled/kp, 1 custom), 2-layer device --------
+// -- fixture: a 3-behavior (1 bundled/kp, 1 custom, 1 def_fp-miss), 2-layer
+// device --------------------------------------------------------------
 //
 // Layer "Base" (id 0): fp === defaultFp (no edits) -> exercised via
 // get_layer.
 // Layer "Fn" (id 1): fp !== defaultFp (one edited position) -> exercised
 // via get_default_layer + get_edited_layer, overlaid.
 
-const KP_BEHAVIOR: BehaviorSummary = {
+interface BehaviorFixture {
+  localId: number;
+  alias: string;
+  displayName: string;
+  metadata: BehaviorDetails["metadata"];
+  defFp: number;
+  /** Mirrors the firmware's fk_behavior_is_standard() classification --
+   * independent of whether the web bundle happens to recognize this
+   * behavior's def_fp (that's MISS_BEHAVIOR's whole point below). */
+  isStandard: boolean;
+}
+
+const KP_METADATA = STANDARD_BEHAVIORS.kp.metadata;
+const KP_BEHAVIOR: BehaviorFixture = {
   localId: 1,
-  alias: "kp",
-  displayName: "Key Press",
-  metadataFp: bundledMetadataFp("kp")!,
-  standard: true,
+  alias: STANDARD_BEHAVIORS.kp.alias,
+  displayName: STANDARD_BEHAVIORS.kp.displayName,
+  metadata: KP_METADATA,
+  defFp: defFp(
+    STANDARD_BEHAVIORS.kp.alias,
+    STANDARD_BEHAVIORS.kp.displayName,
+    KP_METADATA
+  ),
+  isStandard: true,
 };
 
-const CUSTOM_BEHAVIOR: BehaviorSummary = {
+const CUSTOM_METADATA: BehaviorDetails["metadata"] = [
+  { param1: [{ name: "Value", constant: 1 }], param2: [] },
+];
+const CUSTOM_BEHAVIOR: BehaviorFixture = {
   localId: 2,
   alias: "my_custom",
   displayName: "My Custom",
-  metadataFp: 999999, // does not match any bundled alias
-  standard: false,
+  metadata: CUSTOM_METADATA,
+  defFp: defFp("my_custom", "My Custom", CUSTOM_METADATA),
+  isStandard: false,
 };
 
-const CUSTOM_BEHAVIOR_DETAILS: GetBehaviorDetailsResponse = {
-  id: 2,
-  alias: "my_custom",
-  displayName: "My Custom",
-  metadataFp: CUSTOM_BEHAVIOR.metadataFp,
-  metadata: [{ param1: [{ name: "Value", constant: 1 }], param2: [] }],
+// A behavior the FIRMWARE classifies as "standard" (so DETAILS_CUSTOM never
+// inlines it) but whose def_fp the web bundle does NOT recognize (an
+// unbundled/Kconfig-dependent standard behavior, DESIGN.md SS5) -- this is
+// a genuine miss that only the get_behaviors batch can resolve.
+const MISS_METADATA: BehaviorDetails["metadata"] = [];
+const MISS_BEHAVIOR: BehaviorFixture = {
+  localId: 3,
+  alias: "mystery",
+  displayName: "Mystery",
+  metadata: MISS_METADATA,
+  defFp: defFp("mystery", "Mystery", MISS_METADATA),
+  isStandard: true,
 };
 
 const BASE_DEFAULT_BINDINGS = [
@@ -73,59 +104,115 @@ const LAYOUTS: PhysicalLayouts = {
   ],
 };
 
-const SNAPSHOT: Snapshot = {
-  definitionVersion: FK_DEFINITION_VERSION,
-  behaviorsFp: 555,
-  defaultKeymapFp: 777,
-  keymapFp: 888,
-  physicalLayoutFp: 300,
-  behaviorCount: 2,
-  maxLayerNameLength: 16,
-  availableLayers: 2,
-  activeLayoutIndex: 0,
-  layers: [
-    {
-      id: 0,
-      name: "Base",
-      bindingCount: 2,
-      fp: 100,
-      defaultFp: 100,
-      editedCount: 0,
-    },
-    {
-      id: 1,
-      name: "Fn",
-      bindingCount: 2,
-      fp: 200,
-      defaultFp: 201,
-      editedCount: 1,
-    },
-  ],
-};
+function makeSnapshot(overrides: Partial<Snapshot> = {}): Snapshot {
+  return {
+    definitionVersion: FK_DEFINITION_VERSION,
+    behaviorsFp: 555,
+    defaultKeymapFp: 777,
+    keymapFp: 888,
+    physicalLayoutFp: 300,
+    behaviorCount: 2,
+    maxLayerNameLength: 16,
+    availableLayers: 2,
+    activeLayoutIndex: 0,
+    layers: [
+      {
+        id: 0,
+        name: "Base",
+        bindingCount: 2,
+        fp: 100,
+        defaultFp: 100,
+        editedCount: 0,
+      },
+      {
+        id: 1,
+        name: "Fn",
+        bindingCount: 2,
+        fp: 200,
+        defaultFp: 201,
+        editedCount: 1,
+      },
+    ],
+    ...overrides,
+  };
+}
 
-/** A fake FastKeymapCall backed by the fixture above, recording every
+const SNAPSHOT = makeSnapshot();
+
+/** Builds the inline `details` a real device would serve for `fixture`
+ * under `mode`, mirroring the firmware's inlining rule (SS5):
+ * ALL -> always; CUSTOM -> only non-standard; NONE -> never. */
+function summaryFor(
+  fixture: BehaviorFixture,
+  mode: BehaviorDetailsMode
+): BehaviorSummary {
+  const shouldInline =
+    mode === BehaviorDetailsMode.BEHAVIOR_DETAILS_ALL ||
+    (mode === BehaviorDetailsMode.BEHAVIOR_DETAILS_CUSTOM &&
+      !fixture.isStandard);
+
+  return {
+    localId: fixture.localId,
+    defFp: fixture.defFp,
+    details: shouldInline
+      ? {
+          alias: fixture.alias,
+          displayName: fixture.displayName,
+          metadata: fixture.metadata,
+        }
+      : undefined,
+  };
+}
+
+/** A fake FastKeymapCall backed by the fixtures above, recording every
  * request it receives (in typed form -- no wire encoding involved, since
  * loadFastKeymap() talks to `call` directly) so tests can assert exactly
- * which RPCs were (not) made. */
-function makeDeviceCall(): { call: FastKeymapCall; requests: Request[] } {
+ * which RPCs were (not) made.
+ *
+ * `behaviors` controls which fixtures list_behaviors reports (in this
+ * order); the mock computes each one's inline `details` from the
+ * request's mode, exactly like the firmware would. */
+function makeDeviceCall(
+  behaviors: BehaviorFixture[] = [KP_BEHAVIOR, CUSTOM_BEHAVIOR],
+  snapshot: Snapshot = SNAPSHOT
+): { call: FastKeymapCall; requests: Request[] } {
   const requests: Request[] = [];
+  const byLocalId = new Map(behaviors.map((b) => [b.localId, b] as const));
 
   const call: FastKeymapCall = async (request) => {
     requests.push(request);
 
     if (request.getSnapshot) {
-      return { snapshot: SNAPSHOT };
+      return { snapshot };
     }
     if (request.listBehaviors) {
-      return { listBehaviors: { behaviors: [KP_BEHAVIOR, CUSTOM_BEHAVIOR] } };
+      return {
+        listBehaviors: {
+          behaviors: behaviors.map((b) =>
+            summaryFor(b, request.listBehaviors!.details)
+          ),
+        },
+      };
     }
-    if (request.getBehaviorDetails) {
-      if (request.getBehaviorDetails.behaviorId === 2) {
-        return { getBehaviorDetails: CUSTOM_BEHAVIOR_DETAILS };
-      }
-      throw new Error(
-        `unexpected get_behavior_details(${request.getBehaviorDetails.behaviorId})`
-      );
+    if (request.getBehaviors) {
+      return {
+        getBehaviors: {
+          behaviors: request.getBehaviors.behaviorIds.flatMap((id) => {
+            const fixture = byLocalId.get(id);
+            if (!fixture) return [];
+            return [
+              {
+                id,
+                details: {
+                  alias: fixture.alias,
+                  displayName: fixture.displayName,
+                  metadata: fixture.metadata,
+                },
+              },
+            ];
+          }),
+        },
+      };
     }
     if (request.getLayer) {
       if (request.getLayer.layerId === 0) {
@@ -184,13 +271,13 @@ describe("loadFastKeymap", () => {
 
     const model = await loadFastKeymap(call, { deviceKey: DEVICE_KEY });
 
-    // get_snapshot, list_behaviors, get_behavior_details(custom only),
-    // get_layer(0), get_default_layer(1), get_edited_layer(1),
-    // get_physical_layouts.
+    // get_snapshot, list_behaviors(CUSTOM, first connect -> empty cache),
+    // (kp resolves from bundle, my_custom is inlined by CUSTOM mode -- no
+    // get_behaviors needed), get_layer(0), get_default_layer(1),
+    // get_edited_layer(1), get_physical_layouts.
     expect(requestKinds(requests)).toEqual([
       "getSnapshot",
       "listBehaviors",
-      "getBehaviorDetails",
       "getLayer",
       "getDefaultLayer",
       "getEditedLayer",
@@ -203,7 +290,7 @@ describe("loadFastKeymap", () => {
     expect(kp?.resolvedFrom).toBe("bundle");
     expect(kp?.alias).toBe("kp");
     expect(custom?.resolvedFrom).toBe("device");
-    expect(custom?.metadata).toEqual(CUSTOM_BEHAVIOR_DETAILS.metadata);
+    expect(custom?.metadata).toEqual(CUSTOM_METADATA);
 
     expect(model.layers).toHaveLength(2);
     const base = model.layers.find((l) => l.id === 0)!;
@@ -219,6 +306,7 @@ describe("loadFastKeymap", () => {
     expect(model.stats).toEqual({
       behaviorsFromCache: false,
       behaviorsBundled: 1,
+      behaviorsCached: 0,
       behaviorsFetched: 1,
       layersFromCache: 0,
       layersFetchedFull: 1,
@@ -227,19 +315,7 @@ describe("loadFastKeymap", () => {
     });
   });
 
-  it("bundled skip: does not fetch get_behavior_details for a bundled, fp-matching behavior", async () => {
-    const { call, requests } = makeDeviceCall();
-    await loadFastKeymap(call, { deviceKey: DEVICE_KEY });
-
-    const detailsRequests = requests.filter((r) => r.getBehaviorDetails);
-    expect(detailsRequests).toHaveLength(1);
-    expect(detailsRequests[0].getBehaviorDetails?.behaviorId).toBe(2); // only the custom one
-  });
-
-  it("snapshot cache hit: a warm cache makes only get_snapshot, no other RPCs", async () => {
-    // Seed localStorage directly (rather than depending on a prior load) so
-    // this test is self-contained and asserts the cache-hit path in
-    // isolation.
+  it("behaviors_fp cache hit: skips list_behaviors and every get_behaviors round-trip", async () => {
     localStorage.setItem(
       FastKeymapCacheKeys.behaviors(DEVICE_KEY),
       JSON.stringify({
@@ -249,17 +325,15 @@ describe("loadFastKeymap", () => {
             localId: 1,
             alias: "kp",
             displayName: "Key Press",
-            metadataFp: KP_BEHAVIOR.metadataFp,
-            standard: true,
-            metadata: [],
+            defFp: KP_BEHAVIOR.defFp,
+            metadata: KP_METADATA,
           },
           {
             localId: 2,
             alias: "my_custom",
             displayName: "My Custom",
-            metadataFp: CUSTOM_BEHAVIOR.metadataFp,
-            standard: false,
-            metadata: CUSTOM_BEHAVIOR_DETAILS.metadata,
+            defFp: CUSTOM_BEHAVIOR.defFp,
+            metadata: CUSTOM_METADATA,
           },
         ],
       })
@@ -285,10 +359,13 @@ describe("loadFastKeymap", () => {
     const model = await loadFastKeymap(call, { deviceKey: DEVICE_KEY });
 
     expect(requestKinds(requests)).toEqual(["getSnapshot"]);
+    expect(requests.some((r) => r.listBehaviors)).toBe(false);
+    expect(requests.some((r) => r.getBehaviors)).toBe(false);
 
     expect(model.stats).toEqual({
       behaviorsFromCache: true,
       behaviorsBundled: 0,
+      behaviorsCached: 0,
       behaviorsFetched: 0,
       layersFromCache: 2,
       layersFetchedFull: 0,
@@ -299,6 +376,76 @@ describe("loadFastKeymap", () => {
       FN_EFFECTIVE_BINDINGS
     );
     expect(model.behaviors.every((b) => b.resolvedFrom === "cache")).toBe(true);
+  });
+
+  it("cold cache, all bundled-standard: list_behaviors(CUSTOM) with no inline details, resolved from bundle, zero get_behaviors calls", async () => {
+    const { call, requests } = makeDeviceCall([KP_BEHAVIOR]);
+
+    const model = await loadFastKeymap(call, { deviceKey: DEVICE_KEY });
+
+    const listRequest = requests.find((r) => r.listBehaviors);
+    expect(listRequest?.listBehaviors?.details).toBe(
+      BehaviorDetailsMode.BEHAVIOR_DETAILS_CUSTOM
+    );
+    expect(requests.some((r) => r.getBehaviors)).toBe(false);
+
+    expect(model.behaviors).toHaveLength(1);
+    expect(model.behaviors[0].resolvedFrom).toBe("bundle");
+    expect(model.behaviors[0].alias).toBe("kp");
+    expect(model.stats.behaviorsBundled).toBe(1);
+    expect(model.stats.behaviorsFetched).toBe(0);
+  });
+
+  it("cold cache with a custom behavior: its details are inlined by CUSTOM mode, resolved as device, no batch needed", async () => {
+    const { call, requests } = makeDeviceCall([KP_BEHAVIOR, CUSTOM_BEHAVIOR]);
+
+    const model = await loadFastKeymap(call, { deviceKey: DEVICE_KEY });
+
+    expect(requests.some((r) => r.getBehaviors)).toBe(false);
+
+    const custom = model.behaviors.find((b) => b.localId === 2);
+    expect(custom?.resolvedFrom).toBe("device");
+    expect(custom?.alias).toBe("my_custom");
+    expect(custom?.metadata).toEqual(CUSTOM_METADATA);
+    expect(model.stats.behaviorsFetched).toBe(1);
+  });
+
+  it("a def_fp miss (neither inlined nor bundled) is resolved by exactly one get_behaviors batch", async () => {
+    const { call, requests } = makeDeviceCall([KP_BEHAVIOR, MISS_BEHAVIOR]);
+
+    const model = await loadFastKeymap(call, { deviceKey: DEVICE_KEY });
+
+    const batchRequests = requests.filter((r) => r.getBehaviors);
+    expect(batchRequests).toHaveLength(1);
+    expect(batchRequests[0].getBehaviors?.behaviorIds).toEqual([3]);
+
+    const mystery = model.behaviors.find((b) => b.localId === 3);
+    expect(mystery?.resolvedFrom).toBe("device");
+    expect(mystery?.alias).toBe("mystery");
+    expect(mystery?.metadata).toEqual(MISS_METADATA);
+    expect(model.stats.behaviorsFetched).toBe(1);
+  });
+
+  it("definition_version mismatch: requests list_behaviors(ALL)", async () => {
+    const mismatchedSnapshot = makeSnapshot({
+      definitionVersion: FK_DEFINITION_VERSION + 1,
+    });
+    const { call, requests } = makeDeviceCall(
+      [KP_BEHAVIOR, CUSTOM_BEHAVIOR],
+      mismatchedSnapshot
+    );
+
+    const model = await loadFastKeymap(call, { deviceKey: DEVICE_KEY });
+
+    const listRequest = requests.find((r) => r.listBehaviors);
+    expect(listRequest?.listBehaviors?.details).toBe(
+      BehaviorDetailsMode.BEHAVIOR_DETAILS_ALL
+    );
+    // Every behavior arrives inlined -- no bundle trust, no batch needed.
+    expect(requests.some((r) => r.getBehaviors)).toBe(false);
+    expect(model.behaviors.every((b) => b.resolvedFrom === "device")).toBe(
+      true
+    );
   });
 
   it("edited-diff assembly: a cached default layer + get_edited_layer overlays correctly", async () => {

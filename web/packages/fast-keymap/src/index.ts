@@ -26,20 +26,23 @@ export {
 export {
   FK_DEFINITION_VERSION,
   STANDARD_BEHAVIORS,
-  bundledMetadataFp,
+  bundledByDefFp,
   type StandardBehaviorDef,
 } from "./standardBehaviors";
 
-export { crc32Update, metadataFp } from "./fingerprint";
+export { crc32Update, crcStrU16len, defFp } from "./fingerprint";
 
 export type {
   ErrorResponse,
   Snapshot,
   LayerFingerprint,
+  ListBehaviorsRequest,
   ListBehaviorsResponse,
   BehaviorSummary,
-  GetBehaviorDetailsRequest,
-  GetBehaviorDetailsResponse,
+  BehaviorDetails,
+  GetBehaviorsRequest,
+  GetBehaviorsResponse,
+  BehaviorEntry,
   GetLayerRequest,
   BehaviorBindingParametersSet,
   BehaviorParameterValueDescription,
@@ -60,4 +63,5 @@ export {
   Request,
   Response,
   ErrorCode,
+  BehaviorDetailsMode,
 } from "./proto/cormoran/fast-keymap/fast_keymap";

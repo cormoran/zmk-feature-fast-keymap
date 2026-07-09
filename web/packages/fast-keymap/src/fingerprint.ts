@@ -61,11 +61,11 @@ function crcU32le(seed: number, v: number): number {
 const textEncoder = new TextEncoder();
 
 /** DESIGN.md SS5's `u8 name_len ; name bytes` -- ONLY used inside
- * metadata_fp (unlike behaviors_fp's alias/display_name, which use a u16
- * length prefix -- fk_crc_str_u16len() in the firmware; metadataFp() below
- * never needs that variant). Names longer than 255 UTF-8 bytes are
- * truncated to match the firmware's u8 length prefix (an unrealistic case
- * for behavior parameter value display names). */
+ * metadata bytes (unlike def_fp's alias/display_name, which use a u16
+ * length prefix -- see crcStrU16len() below, mirroring the firmware's
+ * fk_crc_str_u16len()). Names longer than 255 UTF-8 bytes are truncated to
+ * match the firmware's u8 length prefix (an unrealistic case for behavior
+ * parameter value display names). */
 function crcStrU8len(seed: number, s: string): number {
   const bytes = textEncoder.encode(s);
   const len = Math.min(bytes.length, 0xff);
@@ -76,8 +76,24 @@ function crcStrU8len(seed: number, s: string): number {
   return seed;
 }
 
+/** DESIGN.md SS4's `str16` primitive -- `u16le length` + raw UTF-8 bytes,
+ * reproduced bit-for-bit from the firmware's `crc_str_u16le()`. Used for
+ * behavior alias/display_name (def_fp's preimage, §4/§5) -- distinct from
+ * crcStrU8len() above, which is only used INSIDE the metadata bytes for a
+ * parameter value's display name. Names longer than 65535 UTF-8 bytes are
+ * truncated to match the firmware's u16 length prefix. */
+export function crcStrU16len(seed: number, s: string): number {
+  const bytes = textEncoder.encode(s);
+  const len = Math.min(bytes.length, 0xffff);
+  seed = crc32Update(seed, Uint8Array.of(len & 0xff, (len >>> 8) & 0xff));
+  if (len) {
+    seed = crc32Update(seed, bytes.subarray(0, len));
+  }
+  return seed;
+}
+
 /**
- * Canonical metadata_fp bytes (DESIGN.md SS5), reproduced bit-for-bit from
+ * Canonical metadata bytes (DESIGN.md SS5), reproduced bit-for-bit from
  * `crc_metadata()` in src/fingerprint.c:
  *
  * ```
@@ -90,9 +106,15 @@ function crcStrU8len(seed: number, s: string): number {
  *     u32 b                ; 0        | range.max | hid consumer_max
  *     u8  name_len ; name bytes
  * ```
+ *
+ * This is an internal building block for `defFp()` -- it is no longer a
+ * fingerprint in its own right (the wire no longer carries a per-behavior
+ * `metadata_fp`; see DESIGN.md SS5's `def_fp`).
  */
-export function metadataFp(metadata: BehaviorBindingParametersSet[]): number {
-  let seed = 0;
+function crcMetadata(
+  seed: number,
+  metadata: BehaviorBindingParametersSet[]
+): number {
   seed = crcU8(seed, metadata.length & 0xff);
 
   for (const paramSet of metadata) {
@@ -130,5 +152,29 @@ export function metadataFp(metadata: BehaviorBindingParametersSet[]): number {
     }
   }
 
+  return seed;
+}
+
+/**
+ * `def_fp` (DESIGN.md SS4/SS5): the content-addressed identity + validator
+ * for a single behavior. Reproduced bit-for-bit from
+ * `fk_fp_behavior_def()`/`crc_behavior_def_preimage()` in
+ * `src/fingerprint.c`: the canonical metadata bytes, then `str16 alias`,
+ * then `str16 display_name` -- both **as-served** (the exact strings a
+ * `BehaviorDetails` response carries), chained from seed 0.
+ *
+ * A `def_fp` match proves the caller's bundled/cached copy (alias +
+ * display_name + metadata) is byte-identical to what the device would
+ * serve, so the web keys both its standard-behavior bundle
+ * (`bundledByDefFp()`) and its per-device cache by this value.
+ */
+export function defFp(
+  alias: string,
+  displayName: string,
+  metadata: BehaviorBindingParametersSet[]
+): number {
+  let seed = crcMetadata(0, metadata);
+  seed = crcStrU16len(seed, alias);
+  seed = crcStrU16len(seed, displayName);
   return seed;
 }

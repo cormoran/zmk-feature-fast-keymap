@@ -9,7 +9,8 @@ import {
   Request,
   Response,
   FK_DEFINITION_VERSION,
-  bundledMetadataFp,
+  STANDARD_BEHAVIORS,
+  defFp,
   type Snapshot,
 } from "zmk-feature-fast-keymap";
 import { LockState } from "@zmkfirmware/zmk-studio-ts-client/core";
@@ -66,15 +67,20 @@ function buildResponse(request: Request): Response {
     return { snapshot: SNAPSHOT };
   }
   if (request.listBehaviors) {
+    // Mirrors the firmware: &kp is genuinely standard, so DETAILS_CUSTOM
+    // (the mode a cold per-device cache requests) never inlines its
+    // details -- the component resolves it from the bundle by def_fp.
     return {
       listBehaviors: {
         behaviors: [
           {
             localId: 1,
-            alias: "kp",
-            displayName: "Key Press",
-            metadataFp: bundledMetadataFp("kp")!,
-            standard: true,
+            defFp: defFp(
+              STANDARD_BEHAVIORS.kp.alias,
+              STANDARD_BEHAVIORS.kp.displayName,
+              STANDARD_BEHAVIORS.kp.metadata
+            ),
+            details: undefined,
           },
         ],
       },

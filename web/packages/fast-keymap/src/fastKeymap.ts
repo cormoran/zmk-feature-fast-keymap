@@ -8,18 +8,23 @@
 // default+edited-diff path over a whole-layer fetch.
 
 import {
+  BehaviorDetailsMode,
   ErrorCode,
   type BehaviorBindingParametersSet,
+  type BehaviorDetails,
+  type BehaviorSummary,
   type EditedBinding,
   type Request,
   type Response,
   type Snapshot,
 } from "./proto/cormoran/fast-keymap/fast_keymap";
-import {
-  FK_DEFINITION_VERSION,
-  STANDARD_BEHAVIORS,
-  bundledMetadataFp,
-} from "./standardBehaviors";
+import { FK_DEFINITION_VERSION, bundledByDefFp } from "./standardBehaviors";
+
+/** Miss-repair batch fetch chunk size (DESIGN.md SS5): `GetBehaviorsRequest.
+ * behavior_ids` must fit `CONFIG_ZMK_STUDIO_RPC_RX_BUF_SIZE=128`, so the
+ * firmware bounds it to `max_count:32` -- chunk any larger miss set into
+ * multiple `get_behaviors` round-trips of at most this many ids each. */
+const GET_BEHAVIORS_CHUNK_SIZE = 32;
 
 /** Matches `useCustomSubsystem(...).call` -- see web/src/App.tsx. */
 export type FastKeymapCall = (request: Request) => Promise<Response | null>;
@@ -39,12 +44,17 @@ export interface FastKeymapBehavior {
   localId: number;
   alias: string;
   displayName: string;
-  metadataFp: number;
-  standard: boolean;
+  /** Content-addressed identity + validator (DESIGN.md SS4/SS5) -- replaces
+   * the old per-behavior `metadataFp`. Keys both the bundle and the
+   * per-device cache. */
+  defFp: number;
   metadata: BehaviorBindingParametersSet[];
-  /** How this behavior's metadata was obtained -- "bundle" and "cache" mean
-   * `get_behavior_details` was NOT called for it. Purely informational
-   * (drives the "fast load" indicator in the UI). */
+  /** How this behavior's alias/display_name/metadata was obtained --
+   * "bundle" and "cache" mean `get_behaviors` was NOT called for it.
+   * Purely informational (drives the "fast load" indicator in the UI).
+   * There is no separate wire `standard` flag any more -- a behavior is
+   * effectively "standard, and resolved without a device round-trip" iff
+   * `resolvedFrom === "bundle"`. */
   resolvedFrom: BehaviorResolvedFrom;
 }
 
@@ -77,13 +87,20 @@ export interface FastKeymapLayout {
 
 export interface FastKeymapLoadStats {
   /** `behaviors_fp` matched the cache: `list_behaviors` was skipped
-   * entirely (and so was every `get_behavior_details`). */
+   * entirely (and so was every `get_behaviors` round-trip). */
   behaviorsFromCache: boolean;
   /** Behaviors resolved from the bundled standard-definitions table
-   * (metadata_fp matched) without a `get_behavior_details` round-trip.
-   * Only meaningful when `behaviorsFromCache` is false. */
+   * (`def_fp` matched a bundle entry) without a device round-trip. Only
+   * meaningful when `behaviorsFromCache` is false. */
   behaviorsBundled: number;
-  /** Behaviors that required a `get_behavior_details` round-trip. */
+  /** Behaviors resolved from a stale per-device cache entry whose `def_fp`
+   * still matched (i.e. `behaviors_fp` changed, but this particular
+   * behavior didn't) -- no device round-trip needed for these either. Only
+   * meaningful when `behaviorsFromCache` is false. */
+  behaviorsCached: number;
+  /** Behaviors resolved from the device -- either inlined in the
+   * `list_behaviors` response (`CUSTOM`/`ALL` mode) or fetched via one or
+   * more `get_behaviors` batch round-trips (a `def_fp` miss). */
   behaviorsFetched: number;
   /** Layers whose whole effective binding list came from the cache (`fp`
    * match, zero RPCs). */
@@ -193,6 +210,7 @@ export async function loadFastKeymap(
     stats: {
       behaviorsFromCache: behaviorsResult.fromCache,
       behaviorsBundled: behaviorsResult.bundledCount,
+      behaviorsCached: behaviorsResult.cachedCount,
       behaviorsFetched: behaviorsResult.fetchedCount,
       layersFromCache: layersResult.fromCacheCount,
       layersFetchedFull: layersResult.fetchedFullCount,
@@ -266,9 +284,23 @@ interface SerializedBehavior {
   localId: number;
   alias: string;
   displayName: string;
-  metadataFp: number;
-  standard: boolean;
+  defFp: number;
   metadata: BehaviorBindingParametersSet[];
+}
+
+/** Guards against an old-shaped cache entry (pre-def_fp protocol: had
+ * `metadataFp`/`standard`, no `defFp`) -- treat it exactly like a miss
+ * rather than crashing on it. See DESIGN.md SS5 / this function's callers. */
+function isSerializedBehavior(value: unknown): value is SerializedBehavior {
+  if (!value || typeof value !== "object") return false;
+  const b = value as Partial<SerializedBehavior>;
+  return (
+    typeof b.localId === "number" &&
+    typeof b.alias === "string" &&
+    typeof b.displayName === "string" &&
+    typeof b.defFp === "number" &&
+    Array.isArray(b.metadata)
+  );
 }
 
 function serializeBehavior(behavior: FastKeymapBehavior): SerializedBehavior {
@@ -276,9 +308,42 @@ function serializeBehavior(behavior: FastKeymapBehavior): SerializedBehavior {
     localId: behavior.localId,
     alias: behavior.alias,
     displayName: behavior.displayName,
-    metadataFp: behavior.metadataFp,
-    standard: behavior.standard,
+    defFp: behavior.defFp,
     metadata: behavior.metadata,
+  };
+}
+
+function chunk<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    chunks.push(items.slice(i, i + size));
+  }
+  return chunks;
+}
+
+/**
+ * Resolves one `BehaviorSummary` per the resolution ladder (DESIGN.md SS5 /
+ * the fast-keymap proposal SS2.3):
+ *
+ * 1. inline `details` (present per the request's `BehaviorDetailsMode`) --
+ *    resolvedFrom "device", no further lookup needed.
+ * 2. a per-device cache entry (from a PRIOR load, possibly stale as a
+ *    whole -- see `cacheByDefFp`) whose `defFp` matches -- "cache".
+ * 3. the bundled standard-behavior table, by `defFp` -- "bundle".
+ * 4. otherwise: unresolved -- the caller collects its `local_id` into the
+ *    `get_behaviors` miss-repair batch.
+ */
+function resolveInline(
+  summary: BehaviorSummary,
+  details: BehaviorDetails
+): FastKeymapBehavior {
+  return {
+    localId: summary.localId,
+    alias: details.alias,
+    displayName: details.displayName,
+    defFp: summary.defFp,
+    metadata: details.metadata,
+    resolvedFrom: "device",
   };
 }
 
@@ -292,71 +357,145 @@ async function loadBehaviors(
   behaviors: FastKeymapBehavior[];
   fromCache: boolean;
   bundledCount: number;
+  cachedCount: number;
   fetchedCount: number;
 }> {
   const cacheKey = FastKeymapCacheKeys.behaviors(deviceKey);
-  const cached = readCache<{ fp: number; behaviors: SerializedBehavior[] }>(
+  const cached = readCache<{ fp: number; behaviors: unknown[] }>(
     storage,
     cacheKey
   );
+  const cachedBehaviors = (cached?.behaviors ?? []).filter(
+    isSerializedBehavior
+  );
 
-  if (cached && cached.fp === snapshot.behaviorsFp) {
+  // Whole-set fast path: behaviors_fp matches the last load's -> every
+  // behavior is still exactly as served, skip list_behaviors entirely (and
+  // so every get_behaviors round-trip with it). An old-shaped cache (no
+  // entries survive the isSerializedBehavior filter, even though `cached`
+  // itself is truthy) is treated as absent, not a match.
+  if (
+    cached &&
+    cached.fp === snapshot.behaviorsFp &&
+    cachedBehaviors.length === cached.behaviors.length
+  ) {
     return {
-      behaviors: cached.behaviors.map((b) => ({
+      behaviors: cachedBehaviors.map((b) => ({
         ...b,
         resolvedFrom: "cache" as const,
       })),
       fromCache: true,
       bundledCount: 0,
+      cachedCount: 0,
       fetchedCount: 0,
     };
   }
 
-  const listResponse = await callChecked(call, { listBehaviors: true });
+  // Per-behavior cache lookup, independent of whether the OVERALL
+  // behaviors_fp still matches -- a single changed/added/removed behavior
+  // shouldn't cost every other behavior its cache hit (DESIGN.md SS5's
+  // resolution ladder step 2).
+  const cacheByDefFp = new Map<number, SerializedBehavior>();
+  for (const b of cachedBehaviors) {
+    cacheByDefFp.set(b.defFp, b);
+  }
+
+  // Mode selection (DESIGN.md SS5): an untrusted bundle (definition_version
+  // mismatch) needs everything inlined (ALL); an empty per-device cache
+  // (first connect for this device, or an old-shaped cache discarded above)
+  // needs at least the non-standard behaviors inlined (CUSTOM) since there's
+  // no cache to fall back on and only the bundle covers "standard"; once
+  // both a trusted bundle AND a warm per-device cache exist, slim summaries
+  // (NONE) are enough -- every behavior resolves from bundle or cache.
+  const mode = !bundleTrusted
+    ? BehaviorDetailsMode.BEHAVIOR_DETAILS_ALL
+    : cachedBehaviors.length === 0
+      ? BehaviorDetailsMode.BEHAVIOR_DETAILS_CUSTOM
+      : BehaviorDetailsMode.BEHAVIOR_DETAILS_NONE;
+
+  const listResponse = await callChecked(call, {
+    listBehaviors: { details: mode },
+  });
   const summaries = listResponse.listBehaviors?.behaviors ?? [];
 
-  const behaviors: FastKeymapBehavior[] = [];
+  const behaviors: FastKeymapBehavior[] = new Array(summaries.length);
+  // local_id -> index into `behaviors`, for the misses the batch fetch
+  // below needs to patch in place.
+  const missIndexByLocalId = new Map<number, number>();
   let bundledCount = 0;
+  let cachedCount = 0;
   let fetchedCount = 0;
 
-  for (const summary of summaries) {
-    const bundled = bundleTrusted
-      ? STANDARD_BEHAVIORS[summary.alias]
-      : undefined;
-    const bundledFp = bundled ? bundledMetadataFp(summary.alias) : undefined;
-
-    if (
-      bundled &&
-      bundledFp !== undefined &&
-      bundledFp === summary.metadataFp
-    ) {
-      bundledCount++;
-      behaviors.push({
-        localId: summary.localId,
-        alias: summary.alias,
-        displayName: summary.displayName || bundled.displayName,
-        metadataFp: summary.metadataFp,
-        standard: summary.standard,
-        metadata: bundled.metadata,
-        resolvedFrom: "bundle",
-      });
-      continue;
+  summaries.forEach((summary, index) => {
+    if (summary.details) {
+      fetchedCount++;
+      behaviors[index] = resolveInline(summary, summary.details);
+      return;
     }
 
+    const cacheHit = cacheByDefFp.get(summary.defFp);
+    if (cacheHit) {
+      cachedCount++;
+      behaviors[index] = {
+        localId: summary.localId,
+        alias: cacheHit.alias,
+        displayName: cacheHit.displayName,
+        defFp: summary.defFp,
+        metadata: cacheHit.metadata,
+        resolvedFrom: "cache",
+      };
+      return;
+    }
+
+    const bundled = bundleTrusted ? bundledByDefFp(summary.defFp) : undefined;
+    if (bundled) {
+      bundledCount++;
+      behaviors[index] = {
+        localId: summary.localId,
+        alias: bundled.alias,
+        displayName: bundled.displayName,
+        defFp: summary.defFp,
+        metadata: bundled.metadata,
+        resolvedFrom: "bundle",
+      };
+      return;
+    }
+
+    missIndexByLocalId.set(summary.localId, index);
+  });
+
+  // Miss-repair batch (DESIGN.md SS5): resolve every remaining unresolved
+  // behavior in as few get_behaviors round-trips as fit the request buffer
+  // (chunked at GET_BEHAVIORS_CHUNK_SIZE).
+  const missLocalIds = [...missIndexByLocalId.keys()];
+  for (const idsChunk of chunk(missLocalIds, GET_BEHAVIORS_CHUNK_SIZE)) {
+    const batchResponse = await callChecked(call, {
+      getBehaviors: { behaviorIds: idsChunk },
+    });
+    for (const entry of batchResponse.getBehaviors?.behaviors ?? []) {
+      const index = missIndexByLocalId.get(entry.id);
+      if (index === undefined || !entry.details) continue;
+      fetchedCount++;
+      const summary = summaries[index];
+      behaviors[index] = resolveInline(summary, entry.details);
+    }
+  }
+
+  // Any local_id the device didn't answer for (shouldn't normally happen)
+  // still needs a slot -- fall back to the slim summary's own fields so the
+  // model stays fully populated rather than sparse.
+  for (const [localId, index] of missIndexByLocalId) {
+    if (behaviors[index]) continue;
+    const summary = summaries[index];
     fetchedCount++;
-    const detailsResponse = await callChecked(call, {
-      getBehaviorDetails: { behaviorId: summary.localId },
-    });
-    const details = detailsResponse.getBehaviorDetails;
-    behaviors.push({
-      localId: summary.localId,
-      alias: details?.alias || summary.alias,
-      displayName: details?.displayName || summary.displayName,
-      metadataFp: details?.metadataFp ?? summary.metadataFp,
-      standard: summary.standard,
-      metadata: details?.metadata ?? [],
+    behaviors[index] = {
+      localId,
+      alias: "",
+      displayName: "",
+      defFp: summary.defFp,
+      metadata: [],
       resolvedFrom: "device",
-    });
+    };
   }
 
   writeCache(storage, cacheKey, {
@@ -364,7 +503,13 @@ async function loadBehaviors(
     behaviors: behaviors.map(serializeBehavior),
   });
 
-  return { behaviors, fromCache: false, bundledCount, fetchedCount };
+  return {
+    behaviors,
+    fromCache: false,
+    bundledCount,
+    cachedCount,
+    fetchedCount,
+  };
 }
 
 // -- keymap (layers) --------------------------------------------------------
