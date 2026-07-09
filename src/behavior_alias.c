@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include <zephyr/devicetree.h>
+#include <zephyr/sys/crc.h>
 #include <zephyr/sys/util.h>
 
 #include <drivers/behavior.h>
@@ -127,51 +128,59 @@ const char *fk_behavior_display_name(const struct device *dev) {
 
 /*
  * ZMK's built-in behaviors' devicetree node NAMES (not aliases -- some
- * built-ins have a different node label than node name, e.g. `bl:
- * bcklight`), frozen by dependencies/zmk/app/dts/behaviors/*.dtsi and
+ * built-ins have a different node label than node name, e.g. `bl: bcklight`),
+ * frozen by dependencies/zmk/app/dts/behaviors/*.dtsi and
  * dependencies/zmk/app/dts/behaviors/macros.dtsi. This is intentionally
  * separate from fk_alias_table above: that table now also contains
  * custom/user-defined behaviors and macros, so "is this device_name in the
  * alias table" is no longer a valid definition of "standard".
+ *
+ * To save flash we store only the crc32_ieee() fingerprint of each name
+ * rather than the name strings themselves (~35 pointers + string bytes ->
+ * one uint32 each). The comment on each line is the source name; the values
+ * are `crc32_ieee((uint8_t *)name, strlen(name))` == zlib.crc32(name) and were
+ * verified collision-free for this set. Collision risk with a non-builtin
+ * device name is negligible and would only mis-set the advisory `standard`
+ * hint (never wrong keymap data); regenerate with tools if the list changes.
  */
-static const char *const fk_builtin_device_names[] = {
-    "key_press",
-    "momentary_layer",
-    "transparent",
-    "none",
-    "mod_tap",
-    "layer_tap",
-    "grave_escape",
-    "toggle_layer",
-    "to_layer",
-    "sticky_key",
-    "sticky_layer",
-    "key_toggle",
-    "caps_word",
-    "rgb_ug",
-    "outputs",
-    "z_so_off",
-    "key_repeat",
-    "bcklight",
-    "bluetooth",
-    "extpower",
-    "studio_unlock",
-    "sysreset",
-    "bootload",
-    "macro_tap",
-    "macro_press",
-    "macro_release",
-    "macro_tap_time",
-    "macro_wait_time",
-    "macro_pause_for_release",
-    "macro_param_1to1",
-    "macro_param_1to2",
-    "macro_param_2to1",
-    "macro_param_2to2",
-    "mouse_key_press",
-    "mouse_move",
-    "mouse_scroll",
-    "enc_key_press",
+static const uint32_t fk_builtin_name_fps[] = {
+    0x9FFA0172U, /* key_press */
+    0xB438CCE4U, /* momentary_layer */
+    0x0875E90CU, /* transparent */
+    0x7F9000CFU, /* none */
+    0x0E686AFBU, /* mod_tap */
+    0x0EB18A27U, /* layer_tap */
+    0xE5715B67U, /* grave_escape */
+    0x156757EDU, /* toggle_layer */
+    0xEFE7102AU, /* to_layer */
+    0x560F39B4U, /* sticky_key */
+    0x05B663F1U, /* sticky_layer */
+    0x2ED34CD7U, /* key_toggle */
+    0xA68E54B9U, /* caps_word */
+    0xAB6B8979U, /* rgb_ug */
+    0x0C75AF5CU, /* outputs */
+    0x5C68CF39U, /* z_so_off */
+    0xA36E529CU, /* key_repeat */
+    0x82B97AA4U, /* bcklight */
+    0xD11711C2U, /* bluetooth */
+    0xDFB55690U, /* extpower */
+    0x8FCFBB02U, /* studio_unlock */
+    0x2504EBDDU, /* sysreset */
+    0x7BA08422U, /* bootload */
+    0x5CC73CF4U, /* macro_tap */
+    0x7EB9239FU, /* macro_press */
+    0xC2210A25U, /* macro_release */
+    0xB716CB47U, /* macro_tap_time */
+    0x7AC71B0CU, /* macro_wait_time */
+    0x2817F6E5U, /* macro_pause_for_release */
+    0x64F90E61U, /* macro_param_1to1 */
+    0xFDF05FDBU, /* macro_param_1to2 */
+    0x764CA18FU, /* macro_param_2to1 */
+    0xEF45F035U, /* macro_param_2to2 */
+    0x57CA6127U, /* mouse_key_press */
+    0x5179D216U, /* mouse_move */
+    0xC609D01AU, /* mouse_scroll */
+    0x2511A8F9U, /* enc_key_press */
 };
 
 bool fk_behavior_is_standard(const struct device *dev) {
@@ -179,8 +188,10 @@ bool fk_behavior_is_standard(const struct device *dev) {
         return false;
     }
 
-    for (size_t i = 0; i < ARRAY_SIZE(fk_builtin_device_names); i++) {
-        if (strcmp(fk_builtin_device_names[i], dev->name) == 0) {
+    uint32_t fp = crc32_ieee((const uint8_t *)dev->name, strlen(dev->name));
+
+    for (size_t i = 0; i < ARRAY_SIZE(fk_builtin_name_fps); i++) {
+        if (fk_builtin_name_fps[i] == fp) {
             return true;
         }
     }
