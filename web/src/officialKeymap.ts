@@ -17,6 +17,10 @@ import {
   type RpcConnection,
 } from "@zmkfirmware/zmk-studio-ts-client";
 import type { BehaviorBindingParametersSet } from "@zmkfirmware/zmk-studio-ts-client/behaviors";
+// Type-only -- erased by `verbatimModuleSyntax` at compile time, so this
+// doesn't introduce a real runtime circular import even though benchmark.ts
+// imports this module's `loadOfficialKeymap`/`OfficialKeymapError` values.
+import type { BenchmarkMethodStat } from "./benchmark";
 
 export interface OfficialBehavior {
   id: number;
@@ -51,6 +55,9 @@ export interface OfficialKeymapResult {
    * the same whole-message layer as the fast-keymap path -- see benchmark.ts's
    * matching comment -- so the comparison is fair. */
   readBytes: number;
+  /** Per-RPC-method breakdown of this load's calls -- see
+   * `BenchmarkMethodStat` (benchmark.ts) for the shape and why it exists. */
+  byMethod: BenchmarkMethodStat[];
 }
 
 /**
@@ -63,16 +70,84 @@ export interface OfficialKeymapResult {
 export class OfficialKeymapError extends Error {
   readonly rpcCalls: number;
   readonly readBytes: number;
+  readonly byMethod: BenchmarkMethodStat[];
   readonly cause: unknown;
 
-  constructor(rpcCalls: number, readBytes: number, cause: unknown) {
+  constructor(
+    rpcCalls: number,
+    readBytes: number,
+    byMethod: BenchmarkMethodStat[],
+    cause: unknown
+  ) {
     super(cause instanceof Error ? cause.message : String(cause));
     this.name = "OfficialKeymapError";
     this.rpcCalls = rpcCalls;
     this.readBytes = readBytes;
+    this.byMethod = byMethod;
     this.cause = cause;
     Object.setPrototypeOf(this, OfficialKeymapError.prototype);
   }
+}
+
+/** Returns the single set key of a oneof-shaped request object -- e.g.
+ * `{ behaviors: { listAllBehaviors: true } }`'s outer `"behaviors"` key, or
+ * that inner object's own `"listAllBehaviors"` key. `benchmark.ts` has its
+ * own copy of this same one-liner (see its header comment) -- kept
+ * duplicated rather than shared so the two loaders stay independent
+ * modules. */
+function firstDefinedKey<T extends object>(obj: T): string | undefined {
+  return Object.keys(obj).find(
+    (key) => (obj as Record<string, unknown>)[key] !== undefined
+  );
+}
+
+/** camelCase -> snake_case, e.g. `"getBehaviorDetails"` ->
+ * `"get_behavior_details"` -- matches the official proto method names
+ * (`zmk.behaviors.get_behavior_details` etc.), unlike the field's own
+ * generated camelCase spelling. */
+function camelToSnake(name: string): string {
+  return name.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+}
+
+/** Derives a readable, proto-method-shaped label for one official RPC
+ * request -- e.g. `{ behaviors: { getBehaviorDetails: {...} } }` ->
+ * `"get_behavior_details"`, `{ keymap: { getKeymap: true } }` ->
+ * `"get_keymap"` -- for the per-method breakdown (`BenchmarkMethodStat`). */
+function officialMethodName(request: Omit<Request, "requestId">): string {
+  const outerKey = firstDefinedKey(request);
+  if (!outerKey) return "unknown";
+  const inner = (request as unknown as Record<string, unknown>)[outerKey];
+  if (inner && typeof inner === "object") {
+    const innerKey = firstDefinedKey(inner);
+    if (innerKey) return camelToSnake(innerKey);
+  }
+  return camelToSnake(outerKey);
+}
+
+/** Records one RPC call's cost against its method's running totals in
+ * `byMethod` (creating the entry on first use). */
+function recordMethodStat(
+  byMethod: Map<string, BenchmarkMethodStat>,
+  method: string,
+  bytes: number,
+  ms: number
+): void {
+  const existing = byMethod.get(method);
+  if (existing) {
+    existing.calls++;
+    existing.bytes += bytes;
+    existing.ms += ms;
+  } else {
+    byMethod.set(method, { method, calls: 1, bytes, ms });
+  }
+}
+
+/** Snapshots a per-method breakdown map as an array sorted by descending
+ * time -- matches benchmark.ts's own `sortedByMethod()`. */
+function sortedByMethod(
+  byMethod: Map<string, BenchmarkMethodStat>
+): BenchmarkMethodStat[] {
+  return [...byMethod.values()].sort((a, b) => b.ms - a.ms);
 }
 
 /**
@@ -99,17 +174,23 @@ export async function loadOfficialKeymap(
 ): Promise<OfficialKeymapResult> {
   let rpcCalls = 0;
   let readBytes = 0;
+  const byMethod = new Map<string, BenchmarkMethodStat>();
 
   const call = async (request: Omit<Request, "requestId">) => {
     rpcCalls++;
+    const method = officialMethodName(request);
+    const callStart = performance.now();
     const response = await call_rpc(connection, request);
+    const callMs = performance.now() - callStart;
     // Outer count: `call_rpc()` returns the decoded `RequestResponse`; re-wrap
     // it in the full `zmk.studio.Response` frame it travels in, so this matches
     // the fast-keymap path's whole-`zmk.studio.Response` count (benchmark.ts).
     // requestId zeroed (omitted on the wire) to match the fast-keymap side.
-    readBytes += StudioResponse.encode({
+    const bytes = StudioResponse.encode({
       requestResponse: { ...response, requestId: 0 },
     }).finish().length;
+    readBytes += bytes;
+    recordMethodStat(byMethod, method, bytes, callMs);
     return response;
   };
 
@@ -145,8 +226,19 @@ export async function loadOfficialKeymap(
       })),
     }));
 
-    return { behaviors, layers, rpcCalls, readBytes };
+    return {
+      behaviors,
+      layers,
+      rpcCalls,
+      readBytes,
+      byMethod: sortedByMethod(byMethod),
+    };
   } catch (err) {
-    throw new OfficialKeymapError(rpcCalls, readBytes, err);
+    throw new OfficialKeymapError(
+      rpcCalls,
+      readBytes,
+      sortedByMethod(byMethod),
+      err
+    );
   }
 }

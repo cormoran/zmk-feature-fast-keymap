@@ -132,16 +132,20 @@ function mockOfficialSuccess() {
   zmkClient.call_rpc.mockImplementation(
     (_connection: unknown, req: OfficialRequest) => {
       if (req.behaviors?.listAllBehaviors) {
+        // Two ids -- exercises the get_behavior_details per-behavior
+        // fan-out (benchmark.spec.ts's byMethod assertion below wants
+        // calls > 1 for it), same as officialKeymap.spec.ts's fixture.
         return Promise.resolve({
-          behaviors: { listAllBehaviors: { behaviors: [1] } },
+          behaviors: { listAllBehaviors: { behaviors: [1, 2] } },
         });
       }
       if (req.behaviors?.getBehaviorDetails) {
+        const id = req.behaviors.getBehaviorDetails.behaviorId;
         return Promise.resolve({
           behaviors: {
             getBehaviorDetails: {
-              id: 1,
-              displayName: "Key Press",
+              id,
+              displayName: `Behavior ${id}`,
               metadata: [],
             },
           },
@@ -210,7 +214,39 @@ describe("runBenchmark", () => {
       expect(typeof measurement.rpcCalls).toBe("number");
       expect(typeof measurement.readBytes).toBe("number");
       expect(measurement.error).toBeUndefined();
+
+      // Per-RPC-method breakdown: non-empty, and its per-method sums equal
+      // this measurement's own aggregates -- byMethod is a faithful
+      // decomposition of rpcCalls/readBytes, not a separate/divergent count.
+      expect(measurement.byMethod.length).toBeGreaterThan(0);
+      const sumCalls = measurement.byMethod.reduce((n, m) => n + m.calls, 0);
+      const sumBytes = measurement.byMethod.reduce((n, m) => n + m.bytes, 0);
+      expect(sumCalls).toBe(measurement.rpcCalls);
+      expect(sumBytes).toBe(measurement.readBytes);
+      for (const stat of measurement.byMethod) {
+        expect(typeof stat.ms).toBe("number");
+        expect(stat.ms).toBeGreaterThanOrEqual(0);
+      }
     }
+
+    // fast-keymap's initial (cold-cache) load fetches the snapshot plus at
+    // least one layer/behavior method -- see fastKeymap.ts's loadFastKeymap().
+    const fastMethods = result.fastKeymap.initial.byMethod.map((m) => m.method);
+    expect(fastMethods).toContain("getSnapshot");
+    expect(
+      fastMethods.some((m) =>
+        ["listBehaviors", "getBehaviors", "getLayer"].includes(m)
+      )
+    ).toBe(true);
+
+    // The official path's per-behavior fan-out: get_behavior_details is
+    // called once per behavior id (mockOfficialSuccess() below lists two),
+    // so its breakdown entry shows more than one call.
+    const officialDetails = result.official.initial.byMethod.find(
+      (m) => m.method === "get_behavior_details"
+    );
+    expect(officialDetails).toBeDefined();
+    expect(officialDetails!.calls).toBeGreaterThan(1);
 
     // The cache-hit assertion: fast-keymap's initial load has to talk to
     // the device (get_snapshot + list_behaviors + get_layer +
@@ -233,10 +269,11 @@ describe("runBenchmark", () => {
     );
 
     // The official path has no client cache: both loads should cost the
-    // same number of round-trips (list_all_behaviors + get_behavior_details
-    // + get_keymap = 3 here), unlike fast-keymap's 2nd load above.
-    expect(result.official.initial.rpcCalls).toBe(3);
-    expect(result.official.second.rpcCalls).toBe(3);
+    // same number of round-trips (list_all_behaviors + 2x
+    // get_behavior_details + get_keymap = 4 here), unlike fast-keymap's 2nd
+    // load above.
+    expect(result.official.initial.rpcCalls).toBe(4);
+    expect(result.official.second.rpcCalls).toBe(4);
 
     // ...and, since it re-fetches the exact same data every time, the exact
     // same number of response bytes too -- unlike fast-keymap's 2nd load

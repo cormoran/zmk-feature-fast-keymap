@@ -27,6 +27,7 @@ import type { RpcConnection } from "@zmkfirmware/zmk-studio-ts-client";
 import {
   runBenchmark,
   type BenchmarkMeasurement,
+  type BenchmarkMethodStat,
   type BenchmarkResult,
   type BenchmarkRun,
 } from "./benchmark";
@@ -275,6 +276,100 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024).toFixed(1)} KB`;
 }
 
+/** Formats a millisecond duration for the per-RPC breakdown table, matching
+ * `formatMeasurement()`'s `"xxx.x ms"` style. */
+function formatMs(ms: number): string {
+  return `${ms.toFixed(1)} ms`;
+}
+
+/** One loader/run's per-RPC-method breakdown table (DESIGN.md "Why" -- the
+ * whole point of this section: showing which RPC *methods*, not just total
+ * bytes, cost the time). Renders nothing beyond its heading when `stats` is
+ * empty (e.g. a run that errored before making any calls). */
+function MethodBreakdownTable({
+  label,
+  stats,
+}: {
+  label: string;
+  stats: BenchmarkMethodStat[];
+}) {
+  return (
+    <div className="benchmark-breakdown-run">
+      <h4>{label}</h4>
+      {stats.length === 0 ? (
+        <p className="hint-message">(no calls)</p>
+      ) : (
+        <table className="benchmark-breakdown-table">
+          <thead>
+            <tr>
+              <th>Method</th>
+              <th>Calls</th>
+              <th>Read bytes</th>
+              <th>Time</th>
+            </tr>
+          </thead>
+          <tbody>
+            {stats.map((stat) => (
+              <tr key={stat.method}>
+                <td>
+                  <code>{stat.method}</code>
+                </td>
+                <td>{stat.calls}</td>
+                <td>
+                  {formatBytes(stat.bytes)}
+                  {stat.calls > 1 && (
+                    <span className="benchmark-breakdown-avg">
+                      {" "}
+                      ({formatBytes(stat.bytes / stat.calls)}/call)
+                    </span>
+                  )}
+                </td>
+                <td>
+                  {formatMs(stat.ms)}
+                  {stat.calls > 1 && (
+                    <span className="benchmark-breakdown-avg">
+                      {" "}
+                      ({formatMs(stat.ms / stat.calls)}/call)
+                    </span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+/** Collapsible per-RPC-method breakdown for all four benchmark runs --
+ * separate from the summary `benchmark-table` above, since this is the
+ * detail view for diagnosing *why* a run took as long as it did (per-RPC
+ * cost, not just total bytes -- see benchmark.ts's module doc comment). */
+function BenchmarkBreakdown({ result }: { result: BenchmarkResult }) {
+  return (
+    <details className="benchmark-breakdown">
+      <summary>Per-RPC breakdown (read bytes, calls, time)</summary>
+      <MethodBreakdownTable
+        label="⚡ fast-keymap initial"
+        stats={result.fastKeymap.initial.byMethod}
+      />
+      <MethodBreakdownTable
+        label="⚡ fast-keymap 2nd"
+        stats={result.fastKeymap.second.byMethod}
+      />
+      <MethodBreakdownTable
+        label="📡 official initial"
+        stats={result.official.initial.byMethod}
+      />
+      <MethodBreakdownTable
+        label="📡 official 2nd"
+        stats={result.official.second.byMethod}
+      />
+    </details>
+  );
+}
+
 function BenchmarkRow({ label, run }: { label: string; run: BenchmarkRun }) {
   return (
     <tr>
@@ -385,6 +480,8 @@ function BenchmarkPanel({
           </tbody>
         </table>
       )}
+
+      {result && <BenchmarkBreakdown result={result} />}
 
       {speedup !== null && (
         <p className="badge badge-cache">

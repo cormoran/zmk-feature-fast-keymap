@@ -514,13 +514,18 @@ describe("FastKeymapSection", () => {
       });
 
       // The "Read bytes" column renders too, with human-readable, nonzero
-      // byte counts for both loaders.
+      // byte counts for both loaders. (Matched by its "(initial / 2nd)"
+      // suffix -- the per-RPC breakdown tables below add their own,
+      // differently-labeled "Read bytes" columnheaders.)
       expect(
-        screen.getByRole("columnheader", { name: /Read bytes/i })
+        screen.getByRole("columnheader", { name: /Read bytes \(initial/i })
       ).toBeInTheDocument();
       expect(
         screen.getAllByText(/\d+(\.\d+)? (B|KB) \/ \d+(\.\d+)? (B|KB)/)
       ).not.toHaveLength(0);
+
+      // The collapsible per-RPC breakdown section renders too.
+      expect(screen.getByText(/Per-RPC breakdown/i)).toBeInTheDocument();
     });
 
     it("surfaces the unlock message instead of crashing when the official path is locked", async () => {

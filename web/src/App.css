@@ -92,3 +92,38 @@
   padding: 0.4rem 0.6rem;
   text-align: left;
 }
+
+.benchmark-breakdown {
+  margin-top: 1rem;
+}
+
+.benchmark-breakdown summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.benchmark-breakdown-run {
+  margin-top: 0.75rem;
+}
+
+.benchmark-breakdown-run h4 {
+  margin-bottom: 0.3rem;
+}
+
+.benchmark-breakdown-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.benchmark-breakdown-table th,
+.benchmark-breakdown-table td {
+  border: 1px solid #ccc;
+  padding: 0.3rem 0.5rem;
+  text-align: left;
+}
+
+.benchmark-breakdown-avg {
+  color: #666;
+  font-size: 0.85em;
+}

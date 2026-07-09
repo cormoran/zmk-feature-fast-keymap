@@ -103,6 +103,23 @@ describe("loadOfficialKeymap", () => {
 
     expect(result.rpcCalls).toBe(4);
     expect(result.readBytes).toBeGreaterThan(0);
+
+    // Per-RPC-method breakdown: method names + call counts match the calls
+    // actually made above -- list_all_behaviors and get_keymap once each,
+    // get_behavior_details once per id (two ids here).
+    const byMethod = new Map(result.byMethod.map((m) => [m.method, m]));
+    expect(byMethod.get("list_all_behaviors")?.calls).toBe(1);
+    expect(byMethod.get("get_behavior_details")?.calls).toBe(2);
+    expect(byMethod.get("get_keymap")?.calls).toBe(1);
+    const sumCalls = result.byMethod.reduce((n, m) => n + m.calls, 0);
+    const sumBytes = result.byMethod.reduce((n, m) => n + m.bytes, 0);
+    expect(sumCalls).toBe(result.rpcCalls);
+    expect(sumBytes).toBe(result.readBytes);
+    for (const stat of result.byMethod) {
+      expect(typeof stat.ms).toBe("number");
+      expect(stat.ms).toBeGreaterThanOrEqual(0);
+    }
+
     expect(result.behaviors).toEqual([
       { id: 1, displayName: "Behavior 1", metadata: [] },
       { id: 2, displayName: "Behavior 2", metadata: [] },
@@ -150,5 +167,18 @@ describe("loadOfficialKeymap", () => {
     // load as a whole failed.
     expect(error.readBytes).toBeGreaterThan(0);
     expect(isUnlockRequiredError(error.cause)).toBe(true);
+
+    // byMethod reflects the calls made before the failure: the successful
+    // list_all_behaviors call is recorded, and get_behavior_details is NOT
+    // recorded for its failed attempt (it only records completed calls --
+    // rpcCalls above still counts the attempt, so byMethod's calls sum is
+    // one less than rpcCalls here).
+    const byMethod = new Map(error.byMethod.map((m) => [m.method, m]));
+    expect(byMethod.get("list_all_behaviors")?.calls).toBe(1);
+    expect(byMethod.has("get_behavior_details")).toBe(false);
+    const sumCalls = error.byMethod.reduce((n, m) => n + m.calls, 0);
+    const sumBytes = error.byMethod.reduce((n, m) => n + m.bytes, 0);
+    expect(sumCalls).toBe(1);
+    expect(sumBytes).toBe(error.readBytes);
   });
 });
