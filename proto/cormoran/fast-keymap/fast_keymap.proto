@@ -14,8 +14,8 @@ package cormoran.fast_keymap;
 message Request {
     oneof request_type {
         bool get_snapshot = 1;
-        bool list_behaviors = 2;
-        GetBehaviorDetailsRequest get_behavior_details = 3;
+        ListBehaviorsRequest list_behaviors = 2;
+        GetBehaviorsRequest get_behaviors = 3; // batch details (miss-repair)
         GetLayerRequest get_layer = 4;         // current/effective
         GetLayerRequest get_default_layer = 5; // DT stock default
         GetLayerRequest get_edited_layer = 6;  // diff current vs default
@@ -28,15 +28,13 @@ message Response {
         ErrorResponse error = 1;
         Snapshot snapshot = 2;
         ListBehaviorsResponse list_behaviors = 3;
-        GetBehaviorDetailsResponse get_behavior_details = 4;
+        GetBehaviorsResponse get_behaviors = 4;
         Layer get_layer = 5;
         Layer get_default_layer = 6;
         EditedLayer get_edited_layer = 7;
         PhysicalLayouts get_physical_layouts = 8;
     }
 }
-
-message GetBehaviorDetailsRequest { uint32 behavior_id = 1; }
 
 message GetLayerRequest { uint32 layer_id = 1; }
 
@@ -73,24 +71,47 @@ message LayerFingerprint {
     uint32 edited_count = 6;
 }
 
-message ListBehaviorsResponse { repeated BehaviorSummary behaviors = 1; }
-
-message BehaviorSummary {
-    uint32 local_id = 1;
-    string alias = 2;
-    string display_name = 3;
-    uint32 metadata_fp = 4;
-    bool standard = 5;
+// enum BehaviorDetailsMode -- see DESIGN.md SS5 for the semantics of each
+// mode.
+enum BehaviorDetailsMode {
+    BEHAVIOR_DETAILS_NONE = 0;   // slim summaries only
+    BEHAVIOR_DETAILS_CUSTOM = 1; // inline details for non-standard behaviors
+    BEHAVIOR_DETAILS_ALL = 2;    // inline details for every behavior
 }
 
-// Official shape (zmk.behaviors.GetBehaviorDetailsResponse) plus our
-// `alias`/`metadata_fp` extensions.
-message GetBehaviorDetailsResponse {
+message ListBehaviorsRequest { BehaviorDetailsMode details = 1; }
+
+message ListBehaviorsResponse { repeated BehaviorSummary behaviors = 1; }
+
+// Slim: on the wire this is normally just local_id + def_fp (~10 B);
+// `details` is present only per the request's BehaviorDetailsMode (SS5).
+message BehaviorSummary {
+    uint32 local_id = 1;
+    uint32 def_fp = 2; // content-addressed identity + validator, see SS4
+    BehaviorDetails details = 3;
+}
+
+// The official details tree (zmk.behaviors.GetBehaviorDetailsResponse)
+// factored into a reusable submessage. Deliberately carries NO fingerprint --
+// the client recomputes def_fp from these served fields, guaranteeing both
+// sides agree on the canonicalization (SS4/SS5).
+message BehaviorDetails {
+    string display_name = 1;
+    string alias = 2;
+    repeated BehaviorBindingParametersSet metadata = 3;
+}
+
+// Miss-repair batch fetch (SS5): resolve exactly the behaviors the client
+// couldn't resolve from its bundle/cache, in one round-trip.
+message GetBehaviorsRequest {
+    repeated uint32 behavior_ids = 1; // .options: max_count:32 (fits RX buf)
+}
+
+message GetBehaviorsResponse { repeated BehaviorEntry behaviors = 1; }
+
+message BehaviorEntry {
     uint32 id = 1;
-    string display_name = 2;
-    string alias = 3;
-    uint32 metadata_fp = 4;
-    repeated BehaviorBindingParametersSet metadata = 5;
+    BehaviorDetails details = 2;
 }
 
 // -- The following metadata messages are copied verbatim (names, field

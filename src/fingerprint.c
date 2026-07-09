@@ -46,8 +46,8 @@ static uint32_t crc_i16le(uint32_t seed, int16_t v) { return crc_u16le(seed, (ui
 
 /* `u16 length` prefix + raw bytes, used for behavior alias/display_name and
  * layer/physical-layout names (SS4). NOT used for behavior parameter value
- * display names inside metadata_fp -- SS5 freezes those with a `u8` length
- * prefix instead; see crc_str_u8len() below. */
+ * display names inside the metadata bytes (def_fp's preimage) -- SS5 freezes
+ * those with a `u8` length prefix instead; see crc_str_u8len() below. */
 static uint32_t crc_str_u16len(uint32_t seed, const char *s) {
     size_t len = s ? strlen(s) : 0;
     seed = crc_u16le(seed, (uint16_t)len);
@@ -57,7 +57,8 @@ static uint32_t crc_str_u16len(uint32_t seed, const char *s) {
     return seed;
 }
 
-/* SS5's `u8 name_len ; name bytes` -- only used inside metadata_fp. */
+/* SS5's `u8 name_len ; name bytes` -- only used inside the metadata bytes
+ * (def_fp's preimage). */
 static uint32_t crc_str_u8len(uint32_t seed, const char *s) {
     size_t len = s ? strlen(s) : 0;
     seed = crc_u8(seed, (uint8_t)len);
@@ -119,8 +120,9 @@ uint32_t fk_behavior_count(void) {
     return count;
 }
 
-/* Canonical metadata bytes (DESIGN.md SS5), shared by fk_fp_behavior_metadata()
- * (a standalone fp) and fk_fp_behaviors() (embedded per-behavior). */
+/* Canonical metadata bytes (DESIGN.md SS5), shared by fk_fp_behavior_def()
+ * (a standalone fp, via crc_behavior_def_preimage() below) and
+ * fk_fp_behaviors() (embedded per-behavior). */
 static uint32_t crc_metadata(uint32_t seed, const struct behavior_parameter_metadata *meta) {
     size_t sets_len = meta ? meta->sets_len : 0;
     seed = crc_u8(seed, (uint8_t)sets_len);
@@ -184,13 +186,24 @@ static int get_metadata(const struct device *dev, struct behavior_parameter_meta
     return behavior_get_parameter_metadata(dev, out);
 }
 
-uint32_t fk_fp_behavior_metadata(const struct device *dev) {
+/* def_fp's preimage (DESIGN.md SS4/SS5): metadata bytes + str16 alias +
+ * str16 display_name, both AS-SERVED (fk_behavior_served_alias() /
+ * fk_behavior_display_name()) -- the exact strings BehaviorDetails puts on
+ * the wire. Shared by fk_fp_behavior_def() (seed 0) and fk_fp_behaviors()
+ * (chained after each behavior's u16 local_id) so the two can never
+ * disagree (DESIGN.md SS4's behaviors_fp definition). */
+static uint32_t crc_behavior_def_preimage(uint32_t seed, const struct device *dev) {
     struct behavior_parameter_metadata meta;
     /* A behavior without metadata support (or an error fetching it) hashes
      * as "0 sets" -- deterministic and distinct from any real result. */
     get_metadata(dev, &meta);
-    return crc_metadata(0, &meta);
+    seed = crc_metadata(seed, &meta);
+    seed = crc_str_u16len(seed, fk_behavior_served_alias(dev));
+    seed = crc_str_u16len(seed, fk_behavior_display_name(dev));
+    return seed;
 }
+
+uint32_t fk_fp_behavior_def(const struct device *dev) { return crc_behavior_def_preimage(0, dev); }
 
 uint32_t fk_fp_behaviors(void) {
     uint32_t seed = 0;
@@ -217,13 +230,7 @@ uint32_t fk_fp_behaviors(void) {
         }
 
         seed = crc_u16le(seed, (uint16_t)best_id);
-
-        struct behavior_parameter_metadata meta;
-        get_metadata(best_dev, &meta);
-        seed = crc_metadata(seed, &meta);
-
-        seed = crc_str_u16len(seed, fk_behavior_alias(best_dev));
-        seed = crc_str_u16len(seed, fk_behavior_display_name(best_dev));
+        seed = crc_behavior_def_preimage(seed, best_dev);
 
         last_id = best_id;
     }

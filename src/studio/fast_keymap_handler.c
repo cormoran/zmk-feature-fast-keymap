@@ -148,16 +148,35 @@ static int handle_get_snapshot(cormoran_fast_keymap_Response *resp) {
     return 0;
 }
 
-/* -- list_behaviors ---------------------------------------------------- */
+/* -- behavior details (BehaviorDetails submessage) ---------------------
+ *
+ * Shared by list_behaviors' inline `details` (DESIGN.md SS5 modes) and
+ * get_behaviors' batch BehaviorEntry.details -- both encode the exact same
+ * alias/display_name/metadata for a device, via fill_behavior_details()
+ * below. BehaviorDetails carries no fingerprint; the client recomputes
+ * def_fp from these served fields (SS4/SS5).
+ */
+
+struct fk_metadata_encode_state {
+    const struct behavior_parameter_metadata_set *sets;
+    size_t sets_len;
+    size_t i;
+};
+
+/* Reused sequentially (never concurrently -- RPC handling and nanopb's
+ * synchronous depth-first submessage encoding never overlap two behaviors'
+ * encodes) across every behavior a given response fills details for, same
+ * pattern as the layer-fingerprint static array in handle_get_snapshot(). */
+static struct fk_metadata_encode_state fk_metadata_state;
 
 static bool encode_behavior_alias(pb_ostream_t *stream, const pb_field_t *field, void *const *arg) {
     const struct device *dev = (const struct device *)*arg;
-    const char *alias = fk_behavior_alias(dev);
+    /* MUST be the exact same served-alias helper fk_fp_behavior_def() uses
+     * (fingerprint.c) -- see DESIGN.md SS4: def_fp is only a trustworthy
+     * cache key if a client can recompute it byte-for-byte from what this
+     * encoder actually serves. */
+    const char *alias = fk_behavior_served_alias(dev);
 
-    if (!alias) {
-        /* Best-effort fallback: report the device name (DESIGN.md SS2.1). */
-        alias = dev ? dev->name : NULL;
-    }
     if (!alias) {
         return true;
     }
@@ -184,52 +203,6 @@ static bool encode_behavior_display_name(pb_ostream_t *stream, const pb_field_t 
 
     return pb_encode_string(stream, name, strlen(name));
 }
-
-static bool encode_behavior_summaries(pb_ostream_t *stream, const pb_field_t *field,
-                                      void *const *arg) {
-    ARG_UNUSED(arg);
-
-    STRUCT_SECTION_FOREACH(zmk_behavior_local_id_map, beh) {
-        if (!pb_encode_tag_for_field(stream, field)) {
-            return false;
-        }
-
-        cormoran_fast_keymap_BehaviorSummary sum = cormoran_fast_keymap_BehaviorSummary_init_zero;
-        sum.local_id = beh->local_id;
-        sum.alias.funcs.encode = encode_behavior_alias;
-        sum.alias.arg = (void *)beh->device;
-        sum.display_name.funcs.encode = encode_behavior_display_name;
-        sum.display_name.arg = (void *)beh->device;
-        sum.metadata_fp = fk_fp_behavior_metadata(beh->device);
-        sum.standard = fk_behavior_is_standard(beh->device);
-
-        if (!pb_encode_submessage(stream, &cormoran_fast_keymap_BehaviorSummary_msg, &sum)) {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-static int handle_list_behaviors(cormoran_fast_keymap_Response *resp) {
-    cormoran_fast_keymap_ListBehaviorsResponse *out = &resp->response_type.list_behaviors;
-    *out = (cormoran_fast_keymap_ListBehaviorsResponse)
-        cormoran_fast_keymap_ListBehaviorsResponse_init_zero;
-    out->behaviors.funcs.encode = encode_behavior_summaries;
-
-    resp->which_response_type = cormoran_fast_keymap_Response_list_behaviors_tag;
-    return 0;
-}
-
-/* -- get_behavior_details ------------------------------------------- */
-
-struct fk_metadata_encode_state {
-    const struct behavior_parameter_metadata_set *sets;
-    size_t sets_len;
-    size_t i;
-};
-
-static struct fk_metadata_encode_state fk_metadata_state;
 
 static bool encode_value_description_name(pb_ostream_t *stream, const pb_field_t *field,
                                           void *const *arg) {
@@ -333,40 +306,145 @@ static bool encode_metadata_sets(pb_ostream_t *stream, const pb_field_t *field, 
     return true;
 }
 
-static int handle_get_behavior_details(uint32_t behavior_id, cormoran_fast_keymap_Response *resp) {
-    const char *behavior_name = zmk_behavior_find_behavior_name_from_local_id(behavior_id);
-
-    if (!behavior_name) {
-        LOG_WRN("No behavior found for ID %d", behavior_id);
-        set_error(resp, cormoran_fast_keymap_ErrorCode_ERR_INVALID_BEHAVIOR);
-        return 0;
-    }
-
-    const struct device *dev = zmk_behavior_get_binding(behavior_name);
-
+/* Fills a zero-initialized BehaviorDetails message's callback fields for
+ * `dev` into `*details`, using `*state` as the metadata-set iteration
+ * cursor. `state` must be static/persistent storage: nanopb reads it back
+ * later (once for the size pass, once for the encode pass, both after this
+ * function returns) via details->metadata.arg. */
+static void fill_behavior_details(cormoran_fast_keymap_BehaviorDetails *details,
+                                  const struct device *dev,
+                                  struct fk_metadata_encode_state *state) {
     struct behavior_parameter_metadata desc = {0};
     int ret = behavior_get_parameter_metadata(dev, &desc);
     if (ret < 0) {
-        LOG_DBG("Failed to fetch metadata for behavior %d: %d", behavior_id, ret);
+        LOG_DBG("Failed to fetch metadata for behavior device %s: %d", dev ? dev->name : "(null)",
+                ret);
     }
 
-    fk_metadata_state.sets = desc.sets;
-    fk_metadata_state.sets_len = desc.sets_len;
+    state->sets = desc.sets;
+    state->sets_len = desc.sets_len;
+    state->i = 0;
 
-    cormoran_fast_keymap_GetBehaviorDetailsResponse *out =
-        &resp->response_type.get_behavior_details;
-    *out = (cormoran_fast_keymap_GetBehaviorDetailsResponse)
-        cormoran_fast_keymap_GetBehaviorDetailsResponse_init_zero;
-    out->id = behavior_id;
-    out->display_name.funcs.encode = encode_behavior_display_name;
-    out->display_name.arg = (void *)dev;
-    out->alias.funcs.encode = encode_behavior_alias;
-    out->alias.arg = (void *)dev;
-    out->metadata_fp = fk_fp_behavior_metadata(dev);
-    out->metadata.funcs.encode = encode_metadata_sets;
-    out->metadata.arg = &fk_metadata_state;
+    *details = (cormoran_fast_keymap_BehaviorDetails)cormoran_fast_keymap_BehaviorDetails_init_zero;
+    details->display_name.funcs.encode = encode_behavior_display_name;
+    details->display_name.arg = (void *)dev;
+    details->alias.funcs.encode = encode_behavior_alias;
+    details->alias.arg = (void *)dev;
+    details->metadata.funcs.encode = encode_metadata_sets;
+    details->metadata.arg = state;
+}
 
-    resp->which_response_type = cormoran_fast_keymap_Response_get_behavior_details_tag;
+/* -- list_behaviors ---------------------------------------------------- */
+
+/* Copied out of the request into static storage before returning: the
+ * callback below runs after handle_list_behaviors() returns (SS3's
+ * size-pass/encode-pass), so it cannot read from a stack-local mode
+ * variable. */
+static cormoran_fast_keymap_BehaviorDetailsMode fk_list_behaviors_mode;
+
+static bool encode_behavior_summaries(pb_ostream_t *stream, const pb_field_t *field,
+                                      void *const *arg) {
+    cormoran_fast_keymap_BehaviorDetailsMode mode =
+        *(const cormoran_fast_keymap_BehaviorDetailsMode *)*arg;
+
+    STRUCT_SECTION_FOREACH(zmk_behavior_local_id_map, beh) {
+        if (!pb_encode_tag_for_field(stream, field)) {
+            return false;
+        }
+
+        cormoran_fast_keymap_BehaviorSummary sum = cormoran_fast_keymap_BehaviorSummary_init_zero;
+        sum.local_id = beh->local_id;
+        sum.def_fp = fk_fp_behavior_def(beh->device);
+
+        /* DESIGN.md SS5: NONE -> no details; CUSTOM -> details only for
+         * non-standard behaviors (the client's bundle covers standard
+         * ones); ALL -> details on every summary. */
+        bool want_details =
+            mode == cormoran_fast_keymap_BehaviorDetailsMode_BEHAVIOR_DETAILS_ALL ||
+            (mode == cormoran_fast_keymap_BehaviorDetailsMode_BEHAVIOR_DETAILS_CUSTOM &&
+             !fk_behavior_is_standard(beh->device));
+        if (want_details) {
+            sum.has_details = true;
+            fill_behavior_details(&sum.details, beh->device, &fk_metadata_state);
+        }
+
+        if (!pb_encode_submessage(stream, &cormoran_fast_keymap_BehaviorSummary_msg, &sum)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static int handle_list_behaviors(cormoran_fast_keymap_BehaviorDetailsMode mode,
+                                 cormoran_fast_keymap_Response *resp) {
+    fk_list_behaviors_mode = mode;
+
+    cormoran_fast_keymap_ListBehaviorsResponse *out = &resp->response_type.list_behaviors;
+    *out = (cormoran_fast_keymap_ListBehaviorsResponse)
+        cormoran_fast_keymap_ListBehaviorsResponse_init_zero;
+    out->behaviors.funcs.encode = encode_behavior_summaries;
+    out->behaviors.arg = &fk_list_behaviors_mode;
+
+    resp->which_response_type = cormoran_fast_keymap_Response_list_behaviors_tag;
+    return 0;
+}
+
+/* -- get_behaviors (batch miss-repair, DESIGN.md SS5) ------------------ */
+
+/* GetBehaviorsRequest.behavior_ids is a bounded plain-struct field
+ * (.options max_count:32, NOT a callback -- it's a request field decoded
+ * from the small RX buffer), so it's safe/cheap to copy the whole struct by
+ * value into static storage for the callback below to read after
+ * handle_get_behaviors() returns (SS3). */
+static cormoran_fast_keymap_GetBehaviorsRequest fk_get_behaviors_req;
+
+static bool encode_behavior_entries(pb_ostream_t *stream, const pb_field_t *field,
+                                    void *const *arg) {
+    const cormoran_fast_keymap_GetBehaviorsRequest *req =
+        (const cormoran_fast_keymap_GetBehaviorsRequest *)*arg;
+
+    for (pb_size_t i = 0; i < req->behavior_ids_count; i++) {
+        uint32_t id = req->behavior_ids[i];
+        const char *behavior_name = zmk_behavior_find_behavior_name_from_local_id(id);
+        const struct device *dev = behavior_name ? zmk_behavior_get_binding(behavior_name) : NULL;
+
+        if (!dev) {
+            /* Unknown id: skip it rather than failing the whole batch, so a
+             * client's request mostly succeeds even if one id in it (e.g. a
+             * stale cache entry) no longer resolves. */
+            LOG_WRN("get_behaviors: no behavior for id %u, skipping", (unsigned int)id);
+            continue;
+        }
+
+        if (!pb_encode_tag_for_field(stream, field)) {
+            return false;
+        }
+
+        cormoran_fast_keymap_BehaviorEntry entry = cormoran_fast_keymap_BehaviorEntry_init_zero;
+        entry.id = id;
+        entry.has_details = true;
+        fill_behavior_details(&entry.details, dev, &fk_metadata_state);
+
+        if (!pb_encode_submessage(stream, &cormoran_fast_keymap_BehaviorEntry_msg, &entry)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static int handle_get_behaviors(const cormoran_fast_keymap_GetBehaviorsRequest *req,
+                                cormoran_fast_keymap_Response *resp) {
+    fk_get_behaviors_req = *req;
+
+    cormoran_fast_keymap_GetBehaviorsResponse *out = &resp->response_type.get_behaviors;
+    *out = (cormoran_fast_keymap_GetBehaviorsResponse)
+        cormoran_fast_keymap_GetBehaviorsResponse_init_zero;
+    out->behaviors.funcs.encode = encode_behavior_entries;
+    out->behaviors.arg = &fk_get_behaviors_req;
+
+    resp->which_response_type = cormoran_fast_keymap_Response_get_behaviors_tag;
     return 0;
 }
 
@@ -620,10 +698,10 @@ static bool fast_keymap_rpc_handle_request(const zmk_custom_CallRequest *raw_req
         rc = handle_get_snapshot(resp);
         break;
     case cormoran_fast_keymap_Request_list_behaviors_tag:
-        rc = handle_list_behaviors(resp);
+        rc = handle_list_behaviors(req.request_type.list_behaviors.details, resp);
         break;
-    case cormoran_fast_keymap_Request_get_behavior_details_tag:
-        rc = handle_get_behavior_details(req.request_type.get_behavior_details.behavior_id, resp);
+    case cormoran_fast_keymap_Request_get_behaviors_tag:
+        rc = handle_get_behaviors(&req.request_type.get_behaviors, resp);
         break;
     case cormoran_fast_keymap_Request_get_layer_tag:
         rc = handle_get_layer_common(req.request_type.get_layer.layer_id, false, resp);

@@ -23,7 +23,7 @@
  * canonical byte layouts these functions hash with crc32_ieee_update()
  * (zephyr/sys/crc.h, seed 0). The canonical form is an INTERNAL hashing
  * input, never the wire format, and must match the web bundle's TS
- * reimplementation bit-for-bit for behaviors_fp/metadata_fp (the groups the
+ * reimplementation bit-for-bit for behaviors_fp/def_fp (the groups the
  * web reproduces locally). Bump FK_DEFINITION_VERSION if this layout ever
  * changes.
  *
@@ -45,8 +45,12 @@ uint32_t fk_crc_binding(uint32_t seed, const struct zmk_behavior_binding *bindin
 /** behaviors_fp: over all behaviors in ascending local_id order (SS4). */
 uint32_t fk_fp_behaviors(void);
 
-/** metadata_fp for a single behavior device (SS5's canonical byte layout). */
-uint32_t fk_fp_behavior_metadata(const struct device *dev);
+/** def_fp for a single behavior device (SS4/SS5): the canonical metadata
+ * bytes (SS5) + `str16 alias` + `str16 display_name`, using the AS-SERVED
+ * strings (fk_behavior_served_alias() / fk_behavior_display_name()) -- the
+ * exact strings BehaviorDetails puts on the wire, so the client can
+ * recompute this from a details response and it matches. */
+uint32_t fk_fp_behavior_def(const struct device *dev);
 
 /** default_keymap_fp: over every layer's DT-stock bindings (SS4). Equals
  * fk_fp_keymap_bindings_only() when CONFIG_ZMK_KEYMAP_SETTINGS_STORAGE is off

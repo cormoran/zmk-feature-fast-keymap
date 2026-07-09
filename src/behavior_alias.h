@@ -23,6 +23,14 @@
  * / dev->name). */
 const char *fk_behavior_alias(const struct device *dev);
 
+/** The AS-SERVED alias (DESIGN.md SS4/SS5): fk_behavior_alias(dev), falling
+ * back to dev->name when the node has no resolvable label. This is the exact
+ * string the RPC wire encoder sends for BehaviorDetails.alias, so it MUST be
+ * the same helper used by the def_fp/behaviors_fp fingerprint computation
+ * (fingerprint.c) -- sharing it is what guarantees the two can never
+ * disagree. Returns NULL only if dev itself is NULL. */
+const char *fk_behavior_served_alias(const struct device *dev);
+
 /** dev's human-readable display name (struct zmk_behavior_ref's
  * metadata.display_name), or dev->name if no zmk_behavior_ref entry matches. */
 const char *fk_behavior_display_name(const struct device *dev);

@@ -107,6 +107,19 @@ const char *fk_behavior_alias(const struct device *dev) {
     return NULL;
 }
 
+const char *fk_behavior_served_alias(const struct device *dev) {
+    if (!dev) {
+        return NULL;
+    }
+
+    const char *alias = fk_behavior_alias(dev);
+    if (alias) {
+        return alias;
+    }
+
+    return dev->name;
+}
+
 const char *fk_behavior_display_name(const struct device *dev) {
     if (!dev) {
         return "";

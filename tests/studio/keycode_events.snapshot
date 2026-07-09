@@ -1,6 +1,7 @@
 cormoran__fast_keymap, Security: Unsecured
 PASS: fast_keymap_snapshot_fingerprint_stable
 PASS: fast_keymap_get_layer_matches_live_keymap
-PASS: fast_keymap_alias_resolution
+PASS: fast_keymap_list_behaviors_modes_and_def_fp
+PASS: fast_keymap_get_behaviors_batch
 PASS: fast_keymap_invalid_requests
 PASS: fast_keymap_edited_diff_and_default

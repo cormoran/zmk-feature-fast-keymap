@@ -12,6 +12,17 @@
 			tapping-term-ms = <200>;
 			flavor = "tap-preferred";
 		};
+
+		/* Custom behavior with NO node label -- exercises the alias
+		 * fallback (fk_behavior_served_alias() -> dev->name, "my_hold_tap_nolabel")
+		 * used by both the def_fp fingerprint and the wire encoder. */
+		my_hold_tap_nolabel {
+			compatible = "zmk,behavior-hold-tap";
+			#binding-cells = <2>;
+			bindings = <&kp>, <&kp>;
+			tapping-term-ms = <150>;
+			flavor = "balanced";
+		};
 	};
 
 	keymap {

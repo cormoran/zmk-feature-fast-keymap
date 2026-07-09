@@ -10,6 +10,8 @@
 #include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/settings/settings.h>
+#include <zephyr/sys/crc.h>
 #include <zephyr/sys/util.h>
 
 #include <pb_decode.h>
@@ -261,13 +263,175 @@ static bool decode_edited_cb(pb_istream_t *stream, const pb_field_t *field, void
     return true;
 }
 
+/* -- BehaviorDetails decode helpers (alias/display_name/metadata) --
+ *
+ * Small bounded captures (this module's test keymap only has a handful of
+ * distinct behavior devices) used to decode a BehaviorDetails submessage
+ * wherever it's nested: BehaviorSummary.details (list_behaviors) and
+ * BehaviorEntry.details (get_behaviors).
+ */
+
+struct value_desc_capture {
+    char name[32];
+    uint8_t type; /* 0=nil 1=constant 2=range 3=hid_usage 4=layer_id, DESIGN.md SS5 */
+    uint32_t a;
+    uint32_t b;
+};
+typedef CAPTURE_ARRAY(struct value_desc_capture, 4) value_desc_capture_t;
+
+static bool decode_value_desc_cb(pb_istream_t *stream, const pb_field_t *field, void **arg) {
+    ARG_UNUSED(field);
+    value_desc_capture_t *cap = *arg;
+    if (cap->count >= ARRAY_SIZE(cap->entries)) {
+        LOG_ERR("too many parameter values for test capture");
+        return false;
+    }
+
+    cormoran_fast_keymap_BehaviorParameterValueDescription tmp =
+        cormoran_fast_keymap_BehaviorParameterValueDescription_init_zero;
+    struct str_capture name_cap = {0};
+    tmp.name.funcs.decode = decode_str_cb;
+    tmp.name.arg = &name_cap;
+
+    if (!pb_decode(stream, cormoran_fast_keymap_BehaviorParameterValueDescription_fields, &tmp)) {
+        return false;
+    }
+
+    struct value_desc_capture *e = &cap->entries[cap->count++];
+    strncpy(e->name, name_cap.buf, sizeof(e->name) - 1);
+    e->name[sizeof(e->name) - 1] = '\0';
+
+    switch (tmp.which_value_type) {
+    case cormoran_fast_keymap_BehaviorParameterValueDescription_nil_tag:
+        e->type = 0;
+        e->a = 0;
+        e->b = 0;
+        break;
+    case cormoran_fast_keymap_BehaviorParameterValueDescription_constant_tag:
+        e->type = 1;
+        e->a = tmp.value_type.constant;
+        e->b = 0;
+        break;
+    case cormoran_fast_keymap_BehaviorParameterValueDescription_range_tag:
+        e->type = 2;
+        e->a = (uint32_t)tmp.value_type.range.min;
+        e->b = (uint32_t)tmp.value_type.range.max;
+        break;
+    case cormoran_fast_keymap_BehaviorParameterValueDescription_hid_usage_tag:
+        e->type = 3;
+        e->a = tmp.value_type.hid_usage.keyboard_max;
+        e->b = tmp.value_type.hid_usage.consumer_max;
+        break;
+    case cormoran_fast_keymap_BehaviorParameterValueDescription_layer_id_tag:
+        e->type = 4;
+        e->a = 0;
+        e->b = 0;
+        break;
+    default:
+        LOG_ERR("unexpected value_type tag %d", tmp.which_value_type);
+        return false;
+    }
+
+    return true;
+}
+
+struct param_set_capture {
+    value_desc_capture_t param1;
+    value_desc_capture_t param2;
+};
+typedef CAPTURE_ARRAY(struct param_set_capture, 2) param_set_capture_t;
+
+static bool decode_param_set_cb(pb_istream_t *stream, const pb_field_t *field, void **arg) {
+    ARG_UNUSED(field);
+    param_set_capture_t *cap = *arg;
+    if (cap->count >= ARRAY_SIZE(cap->entries)) {
+        LOG_ERR("too many parameter sets for test capture");
+        return false;
+    }
+
+    struct param_set_capture *e = &cap->entries[cap->count++];
+    *e = (struct param_set_capture){0};
+
+    cormoran_fast_keymap_BehaviorBindingParametersSet tmp =
+        cormoran_fast_keymap_BehaviorBindingParametersSet_init_zero;
+    tmp.param1.funcs.decode = decode_value_desc_cb;
+    tmp.param1.arg = &e->param1;
+    tmp.param2.funcs.decode = decode_value_desc_cb;
+    tmp.param2.arg = &e->param2;
+
+    return pb_decode(stream, cormoran_fast_keymap_BehaviorBindingParametersSet_fields, &tmp);
+}
+
+/* Independent (test-local) reimplementation of DESIGN.md SS4/SS5's def_fp
+ * canonicalization, deliberately NOT calling into fingerprint.c -- this is
+ * the "does the web-side recompute match the firmware's reported def_fp"
+ * property, standing in for the real web/TS reimplementation. */
+static uint32_t test_crc_u8(uint32_t seed, uint8_t v) { return crc32_ieee_update(seed, &v, 1); }
+
+static uint32_t test_crc_u16le(uint32_t seed, uint16_t v) {
+    uint8_t buf[2] = {(uint8_t)v, (uint8_t)(v >> 8)};
+    return crc32_ieee_update(seed, buf, sizeof(buf));
+}
+
+static uint32_t test_crc_u32le(uint32_t seed, uint32_t v) {
+    uint8_t buf[4] = {(uint8_t)v, (uint8_t)(v >> 8), (uint8_t)(v >> 16), (uint8_t)(v >> 24)};
+    return crc32_ieee_update(seed, buf, sizeof(buf));
+}
+
+static uint32_t test_crc_str16(uint32_t seed, const char *s) {
+    size_t len = s ? strlen(s) : 0;
+    seed = test_crc_u16le(seed, (uint16_t)len);
+    if (len) {
+        seed = crc32_ieee_update(seed, (const uint8_t *)s, len);
+    }
+    return seed;
+}
+
+static uint32_t test_crc_str8(uint32_t seed, const char *s) {
+    size_t len = s ? strlen(s) : 0;
+    seed = test_crc_u8(seed, (uint8_t)len);
+    if (len) {
+        seed = crc32_ieee_update(seed, (const uint8_t *)s, len);
+    }
+    return seed;
+}
+
+static uint32_t recompute_def_fp(const char *alias, const char *display_name,
+                                 const param_set_capture_t *metadata) {
+    uint32_t seed = 0;
+    seed = test_crc_u8(seed, (uint8_t)metadata->count);
+
+    for (size_t i = 0; i < metadata->count; i++) {
+        const struct param_set_capture *set = &metadata->entries[i];
+        seed = test_crc_u8(seed, (uint8_t)set->param1.count);
+        seed = test_crc_u8(seed, (uint8_t)set->param2.count);
+
+        for (int pass = 0; pass < 2; pass++) {
+            const value_desc_capture_t *values = pass == 0 ? &set->param1 : &set->param2;
+            for (size_t v = 0; v < values->count; v++) {
+                const struct value_desc_capture *val = &values->entries[v];
+                seed = test_crc_u8(seed, val->type);
+                seed = test_crc_u32le(seed, val->a);
+                seed = test_crc_u32le(seed, val->b);
+                seed = test_crc_str8(seed, val->name);
+            }
+        }
+    }
+
+    seed = test_crc_str16(seed, alias);
+    seed = test_crc_str16(seed, display_name);
+    return seed;
+}
+
 struct behavior_summary_entry {
     uint32_t local_id;
+    uint32_t def_fp;
+    bool has_details;
     char alias[48];
-    uint32_t metadata_fp;
-    bool standard;
+    char display_name[48];
+    param_set_capture_t metadata;
 };
-typedef CAPTURE_ARRAY(struct behavior_summary_entry, 64) behavior_summary_capture_t;
+typedef CAPTURE_ARRAY(struct behavior_summary_entry, 16) behavior_summary_capture_t;
 
 static bool decode_behavior_summary_cb(pb_istream_t *stream, const pb_field_t *field, void **arg) {
     ARG_UNUSED(field);
@@ -279,9 +443,14 @@ static bool decode_behavior_summary_cb(pb_istream_t *stream, const pb_field_t *f
 
     cormoran_fast_keymap_BehaviorSummary tmp = cormoran_fast_keymap_BehaviorSummary_init_zero;
     struct str_capture alias_cap = {0};
-    tmp.alias.funcs.decode = decode_str_cb;
-    tmp.alias.arg = &alias_cap;
-    /* display_name intentionally left uncallbacked -- not needed here */
+    struct str_capture display_cap = {0};
+    param_set_capture_t metadata_cap = {0};
+    tmp.details.alias.funcs.decode = decode_str_cb;
+    tmp.details.alias.arg = &alias_cap;
+    tmp.details.display_name.funcs.decode = decode_str_cb;
+    tmp.details.display_name.arg = &display_cap;
+    tmp.details.metadata.funcs.decode = decode_param_set_cb;
+    tmp.details.metadata.arg = &metadata_cap;
 
     if (!pb_decode(stream, cormoran_fast_keymap_BehaviorSummary_fields, &tmp)) {
         return false;
@@ -289,10 +458,13 @@ static bool decode_behavior_summary_cb(pb_istream_t *stream, const pb_field_t *f
 
     struct behavior_summary_entry *e = &captured->entries[captured->count++];
     e->local_id = tmp.local_id;
+    e->def_fp = tmp.def_fp;
+    e->has_details = tmp.has_details;
     strncpy(e->alias, alias_cap.buf, sizeof(e->alias) - 1);
     e->alias[sizeof(e->alias) - 1] = '\0';
-    e->metadata_fp = tmp.metadata_fp;
-    e->standard = tmp.standard;
+    strncpy(e->display_name, display_cap.buf, sizeof(e->display_name) - 1);
+    e->display_name[sizeof(e->display_name) - 1] = '\0';
+    e->metadata = metadata_cap;
     return true;
 }
 
@@ -300,6 +472,59 @@ static const struct behavior_summary_entry *
 find_behavior_by_alias(const behavior_summary_capture_t *cap, const char *alias) {
     for (size_t i = 0; i < cap->count; i++) {
         if (strcmp(cap->entries[i].alias, alias) == 0) {
+            return &cap->entries[i];
+        }
+    }
+    return NULL;
+}
+
+/* -- get_behaviors (batch) decode helpers -------------------------------- */
+
+struct behavior_entry_capture {
+    uint32_t id;
+    char alias[48];
+    char display_name[48];
+    param_set_capture_t metadata;
+};
+typedef CAPTURE_ARRAY(struct behavior_entry_capture, 16) behavior_entry_capture_array_t;
+
+static bool decode_behavior_entry_cb(pb_istream_t *stream, const pb_field_t *field, void **arg) {
+    ARG_UNUSED(field);
+    behavior_entry_capture_array_t *captured = *arg;
+    if (captured->count >= ARRAY_SIZE(captured->entries)) {
+        LOG_ERR("too many behavior entries for test capture");
+        return false;
+    }
+
+    cormoran_fast_keymap_BehaviorEntry tmp = cormoran_fast_keymap_BehaviorEntry_init_zero;
+    struct str_capture alias_cap = {0};
+    struct str_capture display_cap = {0};
+    param_set_capture_t metadata_cap = {0};
+    tmp.details.alias.funcs.decode = decode_str_cb;
+    tmp.details.alias.arg = &alias_cap;
+    tmp.details.display_name.funcs.decode = decode_str_cb;
+    tmp.details.display_name.arg = &display_cap;
+    tmp.details.metadata.funcs.decode = decode_param_set_cb;
+    tmp.details.metadata.arg = &metadata_cap;
+
+    if (!pb_decode(stream, cormoran_fast_keymap_BehaviorEntry_fields, &tmp)) {
+        return false;
+    }
+
+    struct behavior_entry_capture *e = &captured->entries[captured->count++];
+    e->id = tmp.id;
+    strncpy(e->alias, alias_cap.buf, sizeof(e->alias) - 1);
+    e->alias[sizeof(e->alias) - 1] = '\0';
+    strncpy(e->display_name, display_cap.buf, sizeof(e->display_name) - 1);
+    e->display_name[sizeof(e->display_name) - 1] = '\0';
+    e->metadata = metadata_cap;
+    return true;
+}
+
+static const struct behavior_entry_capture *
+find_behavior_entry_by_id(const behavior_entry_capture_array_t *cap, uint32_t id) {
+    for (size_t i = 0; i < cap->count; i++) {
+        if (cap->entries[i].id == id) {
             return &cap->entries[i];
         }
     }
@@ -415,59 +640,251 @@ static int test_get_layer_matches_live_keymap(void) {
     return 0;
 }
 
-static int test_alias_resolution(void) {
+static bool call_list_behaviors(cormoran_fast_keymap_BehaviorDetailsMode mode,
+                                behavior_summary_capture_t *captured) {
     cormoran_fast_keymap_Request req = cormoran_fast_keymap_Request_init_zero;
     req.which_request_type = cormoran_fast_keymap_Request_list_behaviors_tag;
-    req.request_type.list_behaviors = true;
+    req.request_type.list_behaviors = (cormoran_fast_keymap_ListBehaviorsRequest)
+        cormoran_fast_keymap_ListBehaviorsRequest_init_zero;
+    req.request_type.list_behaviors.details = mode;
 
     cormoran_fast_keymap_Response resp = cormoran_fast_keymap_Response_init_zero;
-    behavior_summary_capture_t captured = {0};
     resp.which_response_type = cormoran_fast_keymap_Response_list_behaviors_tag;
     resp.response_type.list_behaviors = (cormoran_fast_keymap_ListBehaviorsResponse)
         cormoran_fast_keymap_ListBehaviorsResponse_init_zero;
     resp.response_type.list_behaviors.behaviors.funcs.decode = decode_behavior_summary_cb;
-    resp.response_type.list_behaviors.behaviors.arg = &captured;
+    resp.response_type.list_behaviors.behaviors.arg = captured;
 
     if (!call_fast_keymap_rpc(&req, &resp)) {
-        return -EINVAL;
+        return false;
     }
     if (resp.which_response_type != cormoran_fast_keymap_Response_list_behaviors_tag) {
-        LOG_ERR("list_behaviors unexpected response type %d", resp.which_response_type);
+        LOG_ERR("list_behaviors(mode=%d) unexpected response type %d", mode,
+                resp.which_response_type);
+        return false;
+    }
+    return true;
+}
+
+/* Covers DESIGN.md SS5's three BehaviorDetailsMode semantics, def_fp
+ * determinism, and the encoder-consistency property: recompute def_fp from
+ * the served alias/display_name/metadata bytes (recompute_def_fp(), a
+ * from-scratch reimplementation of SS4's canonicalization, standing in for
+ * the real web/TS side) and assert it equals what BehaviorSummary.def_fp
+ * reports -- including for a behavior whose devicetree node has no label,
+ * so the device-name alias fallback (fk_behavior_served_alias()) is
+ * exercised on both the fingerprint and the wire encoder. */
+static int test_list_behaviors_modes_and_def_fp(void) {
+    static behavior_summary_capture_t none_cap;
+    static behavior_summary_capture_t all_cap;
+    static behavior_summary_capture_t custom_cap;
+    none_cap = (behavior_summary_capture_t){0};
+    all_cap = (behavior_summary_capture_t){0};
+    custom_cap = (behavior_summary_capture_t){0};
+
+    if (!call_list_behaviors(cormoran_fast_keymap_BehaviorDetailsMode_BEHAVIOR_DETAILS_NONE,
+                             &none_cap) ||
+        !call_list_behaviors(cormoran_fast_keymap_BehaviorDetailsMode_BEHAVIOR_DETAILS_ALL,
+                             &all_cap) ||
+        !call_list_behaviors(cormoran_fast_keymap_BehaviorDetailsMode_BEHAVIOR_DETAILS_CUSTOM,
+                             &custom_cap)) {
         return -EINVAL;
     }
 
+    if (none_cap.count == 0 || none_cap.count != all_cap.count ||
+        none_cap.count != custom_cap.count) {
+        LOG_ERR("list_behaviors returned inconsistent behavior counts across modes (none=%u "
+                "all=%u custom=%u)",
+                (unsigned int)none_cap.count, (unsigned int)all_cap.count,
+                (unsigned int)custom_cap.count);
+        return -EINVAL;
+    }
+
+    /* NONE: no summary carries inline details. */
+    for (size_t i = 0; i < none_cap.count; i++) {
+        if (none_cap.entries[i].has_details) {
+            LOG_ERR("BEHAVIOR_DETAILS_NONE: local_id %u unexpectedly has details",
+                    none_cap.entries[i].local_id);
+            return -EINVAL;
+        }
+    }
+
+    /* ALL: every summary carries inline details, and every one's def_fp
+     * matches an independent recomputation from the served fields -- the
+     * encoder-consistency property. def_fp itself must also match the
+     * mode-independent value reported under NONE. */
+    for (size_t i = 0; i < all_cap.count; i++) {
+        const struct behavior_summary_entry *e = &all_cap.entries[i];
+        if (!e->has_details) {
+            LOG_ERR("BEHAVIOR_DETAILS_ALL: local_id %u missing details", e->local_id);
+            return -EINVAL;
+        }
+
+        uint32_t recomputed = recompute_def_fp(e->alias, e->display_name, &e->metadata);
+        if (recomputed != e->def_fp) {
+            LOG_ERR("def_fp mismatch for local_id %u alias='%s': reported=%u recomputed=%u",
+                    e->local_id, e->alias, e->def_fp, recomputed);
+            return -EINVAL;
+        }
+
+        for (size_t j = 0; j < none_cap.count; j++) {
+            if (none_cap.entries[j].local_id == e->local_id &&
+                none_cap.entries[j].def_fp != e->def_fp) {
+                LOG_ERR("def_fp for local_id %u (alias='%s') differs between NONE (%u) and ALL "
+                        "(%u) modes",
+                        e->local_id, e->alias, none_cap.entries[j].def_fp, e->def_fp);
+                return -EINVAL;
+            }
+        }
+    }
+
+    /* CUSTOM: standard behaviors (kp/mo/trans) have no inline details;
+     * custom ones (myht, and the label-less hold-tap) do, and their alias
+     * matches the DT node label / device-name fallback respectively. */
     static const char *const expect_standard[] = {"kp", "mo", "trans"};
     for (size_t i = 0; i < ARRAY_SIZE(expect_standard); i++) {
         const struct behavior_summary_entry *e =
-            find_behavior_by_alias(&captured, expect_standard[i]);
+            find_behavior_by_alias(&all_cap, expect_standard[i]);
         if (!e) {
             LOG_ERR("list_behaviors did not resolve alias '%s' (count=%u)", expect_standard[i],
-                    (unsigned int)captured.count);
+                    (unsigned int)all_cap.count);
             return -EINVAL;
         }
-        if (!e->standard) {
-            LOG_ERR("behavior '%s' should be reported as standard", expect_standard[i]);
+        const struct behavior_summary_entry *custom_e = NULL;
+        for (size_t j = 0; j < custom_cap.count; j++) {
+            if (custom_cap.entries[j].local_id == e->local_id) {
+                custom_e = &custom_cap.entries[j];
+                break;
+            }
+        }
+        if (!custom_e || custom_e->has_details) {
+            LOG_ERR("BEHAVIOR_DETAILS_CUSTOM: standard behavior '%s' should NOT have details",
+                    expect_standard[i]);
             return -EINVAL;
         }
     }
 
     /* tests/studio/native_sim.keymap defines a custom (non-built-in)
-     * hold-tap `myht: my_hold_tap {...}` referenced from layer_1. Its
-     * device name ("my_hold_tap") isn't in any hardcoded table -- proving
-     * this resolves via the compile-time devicetree node-label walk, not a
-     * fixed list of ZMK built-ins. */
-    const struct behavior_summary_entry *custom = find_behavior_by_alias(&captured, "myht");
-    if (!custom) {
+     * hold-tap `myht: my_hold_tap {...}`. Its device name ("my_hold_tap")
+     * isn't in any hardcoded table -- proving this resolves via the
+     * compile-time devicetree node-label walk, not a fixed list of ZMK
+     * built-ins. */
+    const struct behavior_summary_entry *myht = find_behavior_by_alias(&all_cap, "myht");
+    if (!myht) {
         LOG_ERR("list_behaviors did not resolve alias 'myht' for the custom hold-tap (count=%u)",
-                (unsigned int)captured.count);
+                (unsigned int)all_cap.count);
         return -EINVAL;
     }
-    if (custom->standard) {
-        LOG_ERR("custom behavior 'myht' should NOT be reported as standard");
+    const struct behavior_summary_entry *myht_custom = NULL;
+    for (size_t j = 0; j < custom_cap.count; j++) {
+        if (custom_cap.entries[j].local_id == myht->local_id) {
+            myht_custom = &custom_cap.entries[j];
+            break;
+        }
+    }
+    if (!myht_custom || !myht_custom->has_details) {
+        LOG_ERR("BEHAVIOR_DETAILS_CUSTOM: custom behavior 'myht' should have details");
         return -EINVAL;
     }
 
-    LOG_INF("PASS: fast_keymap_alias_resolution");
+    /* The label-less custom hold-tap: alias falls back to its device name. */
+    const struct behavior_summary_entry *nolabel =
+        find_behavior_by_alias(&all_cap, "my_hold_tap_nolabel");
+    if (!nolabel) {
+        LOG_ERR("list_behaviors did not resolve the label-less custom hold-tap by its "
+                "device-name alias fallback (count=%u)",
+                (unsigned int)all_cap.count);
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: fast_keymap_list_behaviors_modes_and_def_fp");
+    return 0;
+}
+
+/* get_behaviors batch (DESIGN.md SS5 miss-repair): request a couple of
+ * known ids plus one unknown id in the same call, and assert each known id
+ * gets a BehaviorEntry with the right alias/display_name/metadata while the
+ * unknown id yields no entry (this handler's chosen "skip unknown ids"
+ * behavior -- the response still succeeds for the ids that do resolve). */
+static int test_get_behaviors_batch(void) {
+    static behavior_summary_capture_t list_cap;
+    list_cap = (behavior_summary_capture_t){0};
+    if (!call_list_behaviors(cormoran_fast_keymap_BehaviorDetailsMode_BEHAVIOR_DETAILS_ALL,
+                             &list_cap)) {
+        return -EINVAL;
+    }
+
+    const struct behavior_summary_entry *kp = find_behavior_by_alias(&list_cap, "kp");
+    const struct behavior_summary_entry *myht = find_behavior_by_alias(&list_cap, "myht");
+    if (!kp || !myht) {
+        LOG_ERR("could not find 'kp'/'myht' in list_behaviors to seed get_behaviors batch test");
+        return -EINVAL;
+    }
+
+    static const uint32_t unknown_id = 0xBEEF;
+
+    cormoran_fast_keymap_Request req = cormoran_fast_keymap_Request_init_zero;
+    req.which_request_type = cormoran_fast_keymap_Request_get_behaviors_tag;
+    req.request_type.get_behaviors = (cormoran_fast_keymap_GetBehaviorsRequest)
+        cormoran_fast_keymap_GetBehaviorsRequest_init_zero;
+    req.request_type.get_behaviors.behavior_ids_count = 3;
+    req.request_type.get_behaviors.behavior_ids[0] = kp->local_id;
+    req.request_type.get_behaviors.behavior_ids[1] = myht->local_id;
+    req.request_type.get_behaviors.behavior_ids[2] = unknown_id;
+
+    cormoran_fast_keymap_Response resp = cormoran_fast_keymap_Response_init_zero;
+    static behavior_entry_capture_array_t entries_cap;
+    entries_cap = (behavior_entry_capture_array_t){0};
+    resp.which_response_type = cormoran_fast_keymap_Response_get_behaviors_tag;
+    resp.response_type.get_behaviors = (cormoran_fast_keymap_GetBehaviorsResponse)
+        cormoran_fast_keymap_GetBehaviorsResponse_init_zero;
+    resp.response_type.get_behaviors.behaviors.funcs.decode = decode_behavior_entry_cb;
+    resp.response_type.get_behaviors.behaviors.arg = &entries_cap;
+
+    if (!call_fast_keymap_rpc(&req, &resp)) {
+        return -EINVAL;
+    }
+    if (resp.which_response_type != cormoran_fast_keymap_Response_get_behaviors_tag) {
+        LOG_ERR("get_behaviors unexpected response type %d", resp.which_response_type);
+        return -EINVAL;
+    }
+
+    if (entries_cap.count != 2) {
+        LOG_ERR("get_behaviors: expected exactly 2 entries (unknown id skipped), got %u",
+                (unsigned int)entries_cap.count);
+        return -EINVAL;
+    }
+    if (find_behavior_entry_by_id(&entries_cap, unknown_id)) {
+        LOG_ERR("get_behaviors returned an entry for the unknown id %u", unknown_id);
+        return -EINVAL;
+    }
+
+    const struct behavior_entry_capture *kp_entry =
+        find_behavior_entry_by_id(&entries_cap, kp->local_id);
+    const struct behavior_entry_capture *myht_entry =
+        find_behavior_entry_by_id(&entries_cap, myht->local_id);
+    if (!kp_entry || strcmp(kp_entry->alias, "kp") != 0) {
+        LOG_ERR("get_behaviors: kp entry missing or has wrong alias ('%s')",
+                kp_entry ? kp_entry->alias : "(missing)");
+        return -EINVAL;
+    }
+    if (!myht_entry || strcmp(myht_entry->alias, "myht") != 0) {
+        LOG_ERR("get_behaviors: myht entry missing or has wrong alias ('%s')",
+                myht_entry ? myht_entry->alias : "(missing)");
+        return -EINVAL;
+    }
+    if (recompute_def_fp(kp_entry->alias, kp_entry->display_name, &kp_entry->metadata) !=
+        kp->def_fp) {
+        LOG_ERR("get_behaviors: kp entry's fields don't recompute to list_behaviors' def_fp");
+        return -EINVAL;
+    }
+    if (recompute_def_fp(myht_entry->alias, myht_entry->display_name, &myht_entry->metadata) !=
+        myht->def_fp) {
+        LOG_ERR("get_behaviors: myht entry's fields don't recompute to list_behaviors' def_fp");
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: fast_keymap_get_behaviors_batch");
     return 0;
 }
 
@@ -648,19 +1065,32 @@ static int test_invalid_requests(void) {
         return -EINVAL;
     }
 
+    /* get_behaviors with only unknown ids should still succeed with an empty
+     * batch (this handler's chosen "skip unknown ids" behavior -- see
+     * test_get_behaviors_batch() for the mixed known/unknown case). */
     cormoran_fast_keymap_Request bad_behavior = cormoran_fast_keymap_Request_init_zero;
-    bad_behavior.which_request_type = cormoran_fast_keymap_Request_get_behavior_details_tag;
-    bad_behavior.request_type.get_behavior_details.behavior_id = 0xBEEF;
+    bad_behavior.which_request_type = cormoran_fast_keymap_Request_get_behaviors_tag;
+    bad_behavior.request_type.get_behaviors = (cormoran_fast_keymap_GetBehaviorsRequest)
+        cormoran_fast_keymap_GetBehaviorsRequest_init_zero;
+    bad_behavior.request_type.get_behaviors.behavior_ids_count = 1;
+    bad_behavior.request_type.get_behaviors.behavior_ids[0] = 0xBEEF;
 
     resp = (cormoran_fast_keymap_Response)cormoran_fast_keymap_Response_init_zero;
+    static behavior_entry_capture_array_t bad_behavior_cap;
+    bad_behavior_cap = (behavior_entry_capture_array_t){0};
+    resp.which_response_type = cormoran_fast_keymap_Response_get_behaviors_tag;
+    resp.response_type.get_behaviors = (cormoran_fast_keymap_GetBehaviorsResponse)
+        cormoran_fast_keymap_GetBehaviorsResponse_init_zero;
+    resp.response_type.get_behaviors.behaviors.funcs.decode = decode_behavior_entry_cb;
+    resp.response_type.get_behaviors.behaviors.arg = &bad_behavior_cap;
     if (!call_fast_keymap_rpc(&bad_behavior, &resp)) {
         return -EINVAL;
     }
-    if (resp.which_response_type != cormoran_fast_keymap_Response_error_tag ||
-        resp.response_type.error.code != cormoran_fast_keymap_ErrorCode_ERR_INVALID_BEHAVIOR) {
-        LOG_ERR("get_behavior_details with an unknown id should return ERR_INVALID_BEHAVIOR "
-                "(got type=%d code=%d)",
-                resp.which_response_type, resp.response_type.error.code);
+    if (resp.which_response_type != cormoran_fast_keymap_Response_get_behaviors_tag ||
+        bad_behavior_cap.count != 0) {
+        LOG_ERR("get_behaviors with only an unknown id should return an empty batch (got "
+                "type=%d count=%u)",
+                resp.which_response_type, (unsigned int)bad_behavior_cap.count);
         return -EINVAL;
     }
 
@@ -670,6 +1100,25 @@ static int test_invalid_requests(void) {
 
 static int fast_keymap_rpc_test_init(void) {
     int ret;
+
+    /* This test runs from a SYS_INIT (APPLICATION priority), which runs
+     * BEFORE main()'s settings_subsys_init()/settings_load(). Behavior local
+     * IDs (CONFIG_ZMK_BEHAVIOR_LOCAL_ID_TYPE_SETTINGS_TABLE) are only
+     * assigned by the "behavior" settings subtree's commit handler, which
+     * fires when that subtree is loaded/committed; until then every
+     * behavior's local_id is stuck at its zero-initialized default, making
+     * zmk_behavior_get_local_id()/zmk_behavior_find_behavior_name_from_local_id()
+     * and this module's local_id-keyed RPCs (list_behaviors, get_behaviors)
+     * all resolve to id 0 and therefore ambiguous between behaviors. Load it
+     * explicitly here, same fix as zmk-feature-custom-settings's RPC test. */
+    ret = settings_subsys_init();
+    if (ret < 0) {
+        return ret;
+    }
+    ret = settings_load_subtree("behavior");
+    if (ret < 0) {
+        return ret;
+    }
 
     /* Order matters: test_edited_diff_and_default() mutates layer 0's
      * runtime keymap, so run the read-only checks first. */
@@ -683,7 +1132,12 @@ static int fast_keymap_rpc_test_init(void) {
         return ret;
     }
 
-    ret = test_alias_resolution();
+    ret = test_list_behaviors_modes_and_def_fp();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_get_behaviors_batch();
     if (ret < 0) {
         return ret;
     }
