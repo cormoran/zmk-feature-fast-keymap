@@ -151,10 +151,16 @@ message is fine and simpler than app-level paging.
 ## 4. Fingerprints (cache keys) — internal, independent of wire format
 
 Compute with `crc32_ieee_update` (`zephyr/sys/crc.h`, seed 0) over a **canonical
-little-endian byte serialization** of each group. This canonical form is an
-INTERNAL hashing input — it is not the wire format and never leaves the device
-except as the resulting `u32`. Computed on demand (cheap; a few hundred
-bindings = microseconds), no persistence.
+little-endian byte serialization** of each group, then **truncate to the low
+16 bits** (`fk_fp16()`) before serving/caching/chaining — so the `uint32` fp
+fields on the wire stay ≤3-byte varints. This canonical form is an INTERNAL
+hashing input — it is not the wire format and never leaves the device except as
+the resulting 16-bit value. Computed on demand (cheap; a few hundred bindings =
+microseconds), no persistence. The 16-bit width trades a small `def_fp`
+collision chance (~0.7 % per device at ~30 behaviors → at worst one behavior's
+metadata mis-resolved from the bundle, never a crash) for the byte savings;
+`docs/protocol.md` has the exact math. Widening back to 32 bits is a
+`FK_DEFINITION_VERSION` bump.
 
 Canonicalization must be **identical in firmware and in the web bundle** for
 the one group the web actually reproduces locally: per-behavior `def_fp`

@@ -50,8 +50,9 @@ import { defFp } from "./fingerprint";
 
 /** Mirrors the firmware's `FK_DEFINITION_VERSION` (src/fingerprint.h). Bump
  * both together if the canonical fingerprint byte layout below ever
- * changes. */
-export const FK_DEFINITION_VERSION = 1;
+ * changes. v2: fingerprints truncated to 16 bits (defFp() masks to match
+ * the firmware's fk_fp16()). */
+export const FK_DEFINITION_VERSION = 2;
 
 // -- best-effort, board-dependent constants (see file header, exception 1) --
 const BUNDLED_HID_KEYBOARD_MAX_USAGE = 0xff; // ZMK_HID_REPORT_TYPE_HKRO default

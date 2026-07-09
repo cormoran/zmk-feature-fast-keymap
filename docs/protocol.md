@@ -15,8 +15,21 @@ it safely.
 CRC32 (IEEE 802.3 / zlib, reflected polynomial `0xEDB88320`, seed `0`,
 `~crc` in and out). Computed with `crc32_ieee_update()` on-device and a matching
 table implementation in the web app. Fingerprints are **internal hashing
-inputs** — the bytes below never go on the wire; only the resulting `uint32`
-does (inside `Snapshot`).
+inputs** — the bytes below never go on the wire; only the resulting fp does
+(inside `Snapshot` and the behavior/layout summaries).
+
+**16-bit truncation (v2).** Every fp is truncated to its **low 16 bits**
+(`fk_fp16()` in `src/fingerprint.c`, `& 0xffff` in `fingerprint.ts`) before it
+is served, cached, or chained into another fp, so the `uint32` fp fields
+encode as ≤3-byte varints instead of ~5. This is purely a narrower cache key:
+crc32's low 16 bits are as uniformly distributed as any 16-bit hash. The only
+consequence is a higher (but still small) chance that two *distinct* behavior
+definitions collide on the same `def_fp` — with ~30 behaviors, ≈`30²/(2·2¹⁶)` ≈
+0.7 % per device. A `def_fp` collision only ever mis-resolves one behavior's
+metadata from the bundle/cache (a visible-but-non-fatal wrong param label in
+the editor, never a crash); the opaque fps only ever gate a cache refetch, so a
+collision there is harmless. Widening any fp back to 32 bits is a
+`FK_DEFINITION_VERSION` bump (remove the mask on both sides).
 
 Serialization primitives (little-endian):
 

@@ -79,13 +79,15 @@ describe("defFp", () => {
   // regression in the byte layout itself, not just self-consistency against
   // this file's own implementation.
   it("matches an independently computed golden vector (empty metadata)", () => {
-    // seed=0; crc(u8 num_sets=0); crc(str16 "a"); crc(str16 "b")
-    expect(defFp("a", "b", [])).toBe(0x77d4f6fe);
+    // seed=0; crc(u8 num_sets=0); crc(str16 "a"); crc(str16 "b"), then the
+    // FK_DEFINITION_VERSION v2 low-16-bit truncation (0x77d4f6fe & 0xffff).
+    expect(defFp("a", "b", [])).toBe(0xf6fe);
   });
 
   it("matches an independently computed golden vector (kp-shaped metadata)", () => {
     // 1 set: param1=[HID_USAGE "Key" keyboardMax=255 consumerMax=4095], param2=[]
-    // then str16 "kp", then str16 "Key Press".
+    // then str16 "kp", then str16 "Key Press", then the FK_DEFINITION_VERSION
+    // v2 low-16-bit truncation (0x8f0abb1f & 0xffff).
     expect(
       defFp("kp", "Key Press", [
         {
@@ -95,7 +97,7 @@ describe("defFp", () => {
           param2: [],
         },
       ])
-    ).toBe(0x8f0abb1f);
+    ).toBe(0xbb1f);
   });
 });
 

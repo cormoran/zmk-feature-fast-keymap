@@ -16,8 +16,14 @@
 
 /* Compatibility contract version for the canonical fingerprint byte layouts
  * frozen in DESIGN.md SS4/SS5. Bump this (and the mirrored TS constant in
- * the web bundle) whenever that layout changes. */
-#define FK_DEFINITION_VERSION 1
+ * the web bundle) whenever that layout changes.
+ *
+ * v2: every fingerprint is truncated to its low 16 bits (fk_fp16() in
+ * fingerprint.c) so the wire `uint32` fp fields encode as short varints;
+ * def_fp -- the only fp the web reproduces -- is masked identically in
+ * fingerprint.ts, so the bump keeps old caches/bundles from being trusted
+ * against the new (narrower) def_fp values. */
+#define FK_DEFINITION_VERSION 2
 
 /*
  * Fingerprint (cache key) helpers -- see DESIGN.md SS4/SS5 for the frozen

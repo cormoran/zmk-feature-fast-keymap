@@ -86,11 +86,12 @@ message ListBehaviorsRequest { BehaviorDetailsMode details = 1; }
 
 message ListBehaviorsResponse { repeated BehaviorSummary behaviors = 1; }
 
-// Slim: on the wire this is normally just local_id + def_fp (~10 B);
-// `details` is present only per the request's BehaviorDetailsMode (SS5).
+// Slim: on the wire this is normally just local_id + def_fp (~7-8 B; def_fp
+// is truncated to 16 bits -- see SS4/docs/protocol.md); `details` is present
+// only per the request's BehaviorDetailsMode (SS5).
 message BehaviorSummary {
     uint32 local_id = 1;
-    uint32 def_fp = 2; // content-addressed identity + validator, see SS4
+    uint32 def_fp = 2; // content-addressed identity + validator (low 16 bits), see SS4
     BehaviorDetails details = 3;
 }
 

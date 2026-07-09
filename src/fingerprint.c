@@ -44,6 +44,15 @@ static uint32_t crc_i32le(uint32_t seed, int32_t v) { return crc_u32le(seed, (ui
 
 static uint32_t crc_i16le(uint32_t seed, int16_t v) { return crc_u16le(seed, (uint16_t)v); }
 
+/* Every fingerprint this module serves is truncated to its low 16 bits before
+ * it leaves fingerprint.c (wire, caching, and internal chaining all see the
+ * same 16-bit value), so the `uint32` fp fields on the wire encode as <=3-byte
+ * varints instead of ~5. crc32's low 16 bits are as uniformly distributed as
+ * any 16-bit hash, so this is just a narrower cache key -- see DESIGN.md SS4
+ * for the (tiny, cache-key-only) collision tradeoff this trades bytes for.
+ * Mirrored on the web by masking def_fp the same way (fingerprint.ts). */
+static uint32_t fk_fp16(uint32_t crc) { return crc & 0xFFFFu; }
+
 /* `u16 length` prefix + raw bytes, used for behavior alias/display_name and
  * layer/physical-layout names (SS4). NOT used for behavior parameter value
  * display names inside the metadata bytes (def_fp's preimage) -- SS5 freezes
@@ -257,7 +266,7 @@ uint32_t fk_fp_behavior_def(const struct device *dev) {
     }
 #endif
 
-    uint32_t fp = crc_behavior_def_preimage(0, dev);
+    uint32_t fp = fk_fp16(crc_behavior_def_preimage(0, dev));
 
 #if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
     fk_def_fp_cache_insert(dev, fp);
@@ -335,6 +344,8 @@ uint32_t fk_fp_behaviors(void) {
 
         last_id = best_id;
     }
+
+    seed = fk_fp16(seed);
 
 #if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
     fk_behaviors_fp_cache = seed;
@@ -414,6 +425,8 @@ uint32_t fk_fp_default_keymap(void) {
         }
     }
 
+    seed = fk_fp16(seed);
+
 #if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER) && IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
     fk_default_keymap_fp_cache = seed;
     fk_default_keymap_fp_valid = true;
@@ -441,7 +454,7 @@ uint32_t fk_fp_keymap(void) {
         }
     }
 
-    return seed;
+    return fk_fp16(seed);
 }
 
 /* Per-layout physical fp preimage (DESIGN.md SS4/SS6): one layout's `str16
@@ -525,7 +538,7 @@ uint32_t fk_fp_physical_layout_one(const struct zmk_physical_layout *layout) {
     }
 #endif
 
-    uint32_t fp = crc_physical_layout_preimage(0, layout);
+    uint32_t fp = fk_fp16(crc_physical_layout_preimage(0, layout));
 
 #if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
     fk_layout_fp_cache_insert(layout, fp);
@@ -545,7 +558,7 @@ uint32_t fk_fp_physical_layout(void) {
         seed = crc_physical_layout_preimage(seed, layouts[i]);
     }
 
-    return seed;
+    return fk_fp16(seed);
 }
 
 uint32_t fk_fp_layer_current(zmk_keymap_layer_id_t layer_id) {
@@ -558,7 +571,7 @@ uint32_t fk_fp_layer_current(zmk_keymap_layer_id_t layer_id) {
         seed = fk_crc_binding(seed, binding);
     }
 
-    return seed;
+    return fk_fp16(seed);
 }
 
 uint32_t fk_fp_layer_default(zmk_keymap_layer_id_t layer_id) {
@@ -580,6 +593,8 @@ uint32_t fk_fp_layer_default(zmk_keymap_layer_id_t layer_id) {
             zmk_stock_keymap_get_layer_binding_at_idx(layer_id, b);
         seed = fk_crc_binding(seed, binding);
     }
+
+    seed = fk_fp16(seed);
 
 #if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
     if (cacheable) {

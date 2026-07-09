@@ -176,5 +176,11 @@ export function defFp(
   let seed = crcMetadata(0, metadata);
   seed = crcStrU16len(seed, alias);
   seed = crcStrU16len(seed, displayName);
-  return seed;
+  // Truncated to its low 16 bits to mirror the firmware's fk_fp16()
+  // (src/fingerprint.c, FK_DEFINITION_VERSION v2): every fp is served 16-bit
+  // so the wire varints stay short. def_fp is the only fp the web
+  // reproduces, so this mask is the whole web-side change -- the opaque fps
+  // (behaviors_fp, keymap_fp, per-layer/-layout fps) are only ever compared
+  // to the device-reported value, which is already 16-bit.
+  return seed & 0xffff;
 }

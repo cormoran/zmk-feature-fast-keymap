@@ -420,7 +420,10 @@ static uint32_t recompute_def_fp(const char *alias, const char *display_name,
 
     seed = test_crc_str16(seed, alias);
     seed = test_crc_str16(seed, display_name);
-    return seed;
+    /* def_fp is served truncated to 16 bits (fk_fp16() in fingerprint.c /
+     * FK_DEFINITION_VERSION v2); mirror that here so this stand-in for the
+     * web recompute matches BehaviorSummary.def_fp. */
+    return seed & 0xFFFFu;
 }
 
 struct behavior_summary_entry {
