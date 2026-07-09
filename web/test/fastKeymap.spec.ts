@@ -144,6 +144,10 @@ function makeSnapshot(overrides: Partial<Snapshot> = {}): Snapshot {
     maxLayerNameLength: 16,
     availableLayers: 2,
     activeLayoutIndex: 0,
+    // The fixtures below carry full 32-bit defFp() values, so the mocked
+    // device reports 32-bit width (identity mask). def_fp truncation math is
+    // covered by standardBehaviors.spec.
+    defFpBits: 32,
     layers: [
       {
         id: 0,
@@ -285,6 +289,8 @@ function makeDeviceCall(
             name: l.name,
             fp: l.fp,
             keys: [],
+            defaultWidth: 0,
+            defaultHeight: 0,
           })),
         },
       };
@@ -302,7 +308,13 @@ function makeDeviceCall(
       return {
         getPhysicalLayout: {
           index,
-          layout: { name: geometry.name, fp: summary.fp, keys: geometry.keys },
+          layout: {
+            name: geometry.name,
+            fp: summary.fp,
+            keys: geometry.keys,
+            defaultWidth: 0,
+            defaultHeight: 0,
+          },
         },
       };
     }
@@ -672,6 +684,40 @@ describe("loadPhysicalLayoutGeometry", () => {
       fp: SPLIT_LAYOUT_FP,
       keys: SPLIT_LAYOUT_KEYS,
     });
+  });
+
+  it("restores width/height hoisted to default_width/default_height (SS6)", async () => {
+    // A device that hoisted the common 100x100 size: keys matching it carry
+    // width/height 0, non-matching keys carry their own (a 200-wide key).
+    const call: FastKeymapCall = async (request) => {
+      if (request.getPhysicalLayout) {
+        return {
+          getPhysicalLayout: {
+            index: 0,
+            layout: {
+              name: "Hoisted",
+              fp: 4242,
+              defaultWidth: 100,
+              defaultHeight: 100,
+              keys: [
+                { width: 0, height: 0, x: 0, y: 0, r: 0, rx: 0, ry: 0 },
+                { width: 200, height: 0, x: 100, y: 0, r: 0, rx: 0, ry: 0 },
+              ],
+            },
+          },
+        };
+      }
+      throw new Error(`unexpected request: ${JSON.stringify(request)}`);
+    };
+
+    const keys = await loadPhysicalLayoutGeometry(call, 0, {
+      deviceKey: DEVICE_KEY,
+    });
+
+    expect(keys).toEqual([
+      { width: 100, height: 100, x: 0, y: 0, r: 0, rx: 0, ry: 0 },
+      { width: 200, height: 100, x: 100, y: 0, r: 0, rx: 0, ry: 0 },
+    ]);
   });
 });
 

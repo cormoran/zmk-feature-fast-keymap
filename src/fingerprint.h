@@ -18,11 +18,12 @@
  * frozen in DESIGN.md SS4/SS5. Bump this (and the mirrored TS constant in
  * the web bundle) whenever that layout changes.
  *
- * v2: every fingerprint is truncated to its low 16 bits (fk_fp16() in
- * fingerprint.c) so the wire `uint32` fp fields encode as short varints;
- * def_fp -- the only fp the web reproduces -- is masked identically in
- * fingerprint.ts, so the bump keeps old caches/bundles from being trusted
- * against the new (narrower) def_fp values. */
+ * v2: fingerprints are truncated so the wire `uint32` fp fields encode as
+ * short varints -- opaque fps to 16 bits (fk_fp16()), def_fp to a device-
+ * adaptive 16/24/32-bit width (fk_def_fp_bits(), reported in
+ * Snapshot.def_fp_bits) chosen so this device's behaviors never collide.
+ * The web masks its reproduced def_fp identically (fingerprint.ts), so the
+ * bump keeps old caches/bundles from being trusted against the new values. */
 #define FK_DEFINITION_VERSION 2
 
 /*
@@ -64,11 +65,22 @@ uint32_t fk_fp_behaviors(void);
  * bytes (SS5) + `str16 alias` + `str16 display_name`, using the AS-SERVED
  * strings (fk_behavior_served_alias() / fk_behavior_display_name()) -- the
  * exact strings BehaviorDetails puts on the wire, so the client can
- * recompute this from a details response and it matches. Immutable
- * (compile-time metadata/alias/display_name only) -- memoized forever,
- * keyed by `dev` (fingerprint.c), when CONFIG_ZMK_FAST_KEYMAP_FP_CACHE is on
- * (the default); when off, always recomputed with the identical value. */
+ * recompute this from a details response and it matches. Served truncated to
+ * fk_def_fp_bits() (the device-adaptive width, below), NOT a fixed 16 bits.
+ * Immutable (compile-time metadata/alias/display_name only) -- the full
+ * 32-bit value is memoized forever, keyed by `dev` (fingerprint.c), when
+ * CONFIG_ZMK_FAST_KEYMAP_FP_CACHE is on (the default); when off, always
+ * recomputed with the identical value. */
 uint32_t fk_fp_behavior_def(const struct device *dev);
+
+/** The width (16, 24, or 32 bits) def_fp is served at on THIS device: the
+ * smallest at which every behavior's def_fp stays distinct, so two distinct
+ * behaviors can never collide on their served def_fp (which would mis-resolve
+ * one from the web's bundle/cache). Reported in Snapshot.def_fp_bits; the web
+ * masks its bundle/cache keys to the same width. Immutable once local_ids
+ * settle -- memoized like behaviors_fp when CONFIG_ZMK_FAST_KEYMAP_FP_CACHE is
+ * on. See fingerprint.c / DESIGN.md SS4. */
+uint8_t fk_def_fp_bits(void);
 
 /** default_keymap_fp: over every layer's DT-stock bindings (SS4). Equals
  * fk_fp_keymap_bindings_only() when CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER is off

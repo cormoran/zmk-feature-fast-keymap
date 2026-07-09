@@ -135,6 +135,7 @@ static int handle_get_snapshot(cormoran_fast_keymap_Response *resp) {
 
     snap->definition_version = FK_DEFINITION_VERSION;
     snap->behaviors_fp = fk_fp_behaviors();
+    snap->def_fp_bits = fk_def_fp_bits();
     snap->default_keymap_fp = fk_fp_default_keymap();
     snap->keymap_fp = fk_fp_keymap();
     snap->physical_layout_fp = fk_fp_physical_layout();
@@ -608,8 +609,25 @@ static bool encode_layout_name(pb_ostream_t *stream, const pb_field_t *field, vo
     return pb_encode_string(stream, layout->display_name, strlen(layout->display_name));
 }
 
+/* The width/height shared by most keys (see PhysicalLayoutSummary.default_*
+ * in the proto): the first key's size, which is the common case on any
+ * uniform board. Keys matching it encode width/height as 0 (omitted) and the
+ * client fills them back in from these defaults. */
+static void fk_layout_default_size(const struct zmk_physical_layout *l, int32_t *dw, int32_t *dh) {
+    if (l->keys_len > 0) {
+        *dw = l->keys[0].width;
+        *dh = l->keys[0].height;
+    } else {
+        *dw = 0;
+        *dh = 0;
+    }
+}
+
 static bool encode_layout_keys(pb_ostream_t *stream, const pb_field_t *field, void *const *arg) {
     const struct zmk_physical_layout *layout = (const struct zmk_physical_layout *)*arg;
+
+    int32_t dw, dh;
+    fk_layout_default_size(layout, &dw, &dh);
 
     for (size_t kp = 0; kp < layout->keys_len; kp++) {
         const struct zmk_key_physical_attrs *k = &layout->keys[kp];
@@ -618,9 +636,11 @@ static bool encode_layout_keys(pb_ostream_t *stream, const pb_field_t *field, vo
             return false;
         }
 
+        /* Omit width/height (encode 0) when they match the layout default;
+         * the client restores them from PhysicalLayoutSummary.default_*. */
         cormoran_fast_keymap_KeyPhysicalAttrs msg = {
-            .width = k->width,
-            .height = k->height,
+            .width = k->width == dw ? 0 : k->width,
+            .height = k->height == dh ? 0 : k->height,
             .x = k->x,
             .y = k->y,
 #if IS_ENABLED(CONFIG_ZMK_PHYSICAL_LAYOUT_KEY_ROTATION)
@@ -666,10 +686,12 @@ static bool encode_physical_layout_summaries(pb_ostream_t *stream, const pb_fiel
         summary.fp = fk_fp_physical_layout_one(l);
 
         /* DESIGN.md SS6: NONE -> summary only (name + fp, keys omitted for
-         * free by proto3); ALL -> inline every layout's geometry. */
+         * free by proto3); ALL -> inline every layout's geometry (plus the
+         * default_width/height the per-key omission relies on). */
         if (mode == cormoran_fast_keymap_LayoutDetailsMode_LAYOUT_DETAILS_ALL) {
             summary.keys.funcs.encode = encode_layout_keys;
             summary.keys.arg = (void *)l;
+            fk_layout_default_size(l, &summary.default_width, &summary.default_height);
         }
 
         if (!pb_encode_submessage(stream, &cormoran_fast_keymap_PhysicalLayoutSummary_msg,
@@ -726,6 +748,8 @@ static int handle_get_physical_layout(uint32_t layout_index, cormoran_fast_keyma
     out->layout.fp = fk_fp_physical_layout_one(fk_selected_physical_layout);
     out->layout.keys.funcs.encode = encode_layout_keys;
     out->layout.keys.arg = (void *)fk_selected_physical_layout;
+    fk_layout_default_size(fk_selected_physical_layout, &out->layout.default_width,
+                           &out->layout.default_height);
 
     resp->which_response_type = cormoran_fast_keymap_Response_get_physical_layout_tag;
     return 0;

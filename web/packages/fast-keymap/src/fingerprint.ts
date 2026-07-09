@@ -176,11 +176,19 @@ export function defFp(
   let seed = crcMetadata(0, metadata);
   seed = crcStrU16len(seed, alias);
   seed = crcStrU16len(seed, displayName);
-  // Truncated to its low 16 bits to mirror the firmware's fk_fp16()
-  // (src/fingerprint.c, FK_DEFINITION_VERSION v2): every fp is served 16-bit
-  // so the wire varints stay short. def_fp is the only fp the web
-  // reproduces, so this mask is the whole web-side change -- the opaque fps
-  // (behaviors_fp, keymap_fp, per-layer/-layout fps) are only ever compared
-  // to the device-reported value, which is already 16-bit.
-  return seed & 0xffff;
+  // The FULL 32-bit value. The device serves def_fp truncated to a
+  // per-device width (Snapshot.def_fp_bits, the firmware's fk_def_fp_bits()),
+  // so callers mask the value they compare against summary.def_fp with
+  // maskDefFp() below -- the mask is applied at comparison time, not baked
+  // into this canonical value.
+  return seed >>> 0;
+}
+
+/** Masks a full def_fp to the device's served width (Snapshot.def_fp_bits,
+ * one of 16/24/32; 0 is treated as 16 for backward compatibility), mirroring
+ * the firmware's `fk_fp_behavior_def_full() & fk_def_fp_mask()`. */
+export function maskDefFp(fullDefFp: number, bits: number): number {
+  const w = bits && bits >= 16 ? bits : 16;
+  if (w >= 32) return fullDefFp >>> 0;
+  return (fullDefFp & ((1 << w) - 1)) >>> 0;
 }

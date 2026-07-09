@@ -377,11 +377,16 @@ async function loadBehaviors(
   cachedCount: number;
   fetchedCount: number;
 }> {
+  // The width (bits) the device serves def_fp at this session (SS4). Bundle
+  // and cache def_fp keys are masked to it; 0/absent means legacy 16-bit.
+  const servedBits = snapshot.defFpBits || 16;
+
   const cacheKey = FastKeymapCacheKeys.behaviors(deviceKey);
-  const cached = readCache<{ fp: number; behaviors: unknown[] }>(
-    storage,
-    cacheKey
-  );
+  const cached = readCache<{
+    fp: number;
+    defFpBits?: number;
+    behaviors: unknown[];
+  }>(storage, cacheKey);
   const cachedBehaviors = (cached?.behaviors ?? []).filter(
     isSerializedBehavior
   );
@@ -411,10 +416,16 @@ async function loadBehaviors(
   // Per-behavior cache lookup, independent of whether the OVERALL
   // behaviors_fp still matches -- a single changed/added/removed behavior
   // shouldn't cost every other behavior its cache hit (DESIGN.md SS5's
-  // resolution ladder step 2).
+  // resolution ladder step 2). Only trustworthy when the cache was written at
+  // the same def_fp width as this session serves: a cached def_fp masked to a
+  // different width could false-match a different behavior's summary def_fp.
+  // (The whole-set fast path above is inherently width-safe: behaviors_fp
+  // hashes the served def_fps, so a width change already changes it.)
   const cacheByDefFp = new Map<number, SerializedBehavior>();
-  for (const b of cachedBehaviors) {
-    cacheByDefFp.set(b.defFp, b);
+  if ((cached?.defFpBits || 16) === servedBits) {
+    for (const b of cachedBehaviors) {
+      cacheByDefFp.set(b.defFp, b);
+    }
   }
 
   // Mode selection (DESIGN.md SS5): an untrusted bundle (definition_version
@@ -464,7 +475,9 @@ async function loadBehaviors(
       return;
     }
 
-    const bundled = bundleTrusted ? bundledByDefFp(summary.defFp) : undefined;
+    const bundled = bundleTrusted
+      ? bundledByDefFp(summary.defFp, servedBits)
+      : undefined;
     if (bundled) {
       bundledCount++;
       behaviors[index] = {
@@ -517,6 +530,7 @@ async function loadBehaviors(
 
   writeCache(storage, cacheKey, {
     fp: snapshot.behaviorsFp,
+    defFpBits: servedBits,
     behaviors: behaviors.map(serializeBehavior),
   });
 
@@ -712,10 +726,19 @@ function isSerializedLayoutGeometry(
   );
 }
 
-function toLayoutKeys(keys: KeyPhysicalAttrs[]): FastKeymapLayoutKey[] {
-  return keys.map((k) => ({
-    width: k.width,
-    height: k.height,
+/** Reconstructs a layout's keys, restoring each key's width/height from the
+ * summary's `defaultWidth`/`defaultHeight` when the firmware omitted them
+ * (encoded 0) because they matched the common size -- see the proto's
+ * PhysicalLayoutSummary.default_* / DESIGN.md SS6. A real key is never
+ * 0-sized, so `0` unambiguously means "use the default". */
+function toLayoutKeys(layout: {
+  keys: KeyPhysicalAttrs[];
+  defaultWidth: number;
+  defaultHeight: number;
+}): FastKeymapLayoutKey[] {
+  return layout.keys.map((k) => ({
+    width: k.width === 0 ? layout.defaultWidth : k.width,
+    height: k.height === 0 ? layout.defaultHeight : k.height,
     x: k.x,
     y: k.y,
     r: k.r,
@@ -772,7 +795,7 @@ export async function loadPhysicalLayoutGeometry(
     throw new Error(`get_physical_layout(${index}): device returned no layout`);
   }
 
-  const keys = toLayoutKeys(layout.keys);
+  const keys = toLayoutKeys(layout);
   writeLayoutGeometryCache(storage, deviceKey, {
     name: layout.name,
     fp: layout.fp,
@@ -841,7 +864,7 @@ async function loadPhysicalLayouts(
     });
     const activeData = activeResponse.getPhysicalLayout?.layout;
     if (activeData) {
-      const keys = toLayoutKeys(activeData.keys);
+      const keys = toLayoutKeys(activeData);
       activeLayout.name = activeData.name;
       activeLayout.fp = activeData.fp;
       activeLayout.keys = keys;

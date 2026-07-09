@@ -59,6 +59,7 @@ const SNAPSHOT: Snapshot = {
   maxLayerNameLength: 8,
   availableLayers: 1,
   activeLayoutIndex: 0,
+  defFpBits: 32, // fixture uses full defFp() values (identity mask)
   layers: [
     {
       id: 0,
@@ -108,7 +109,15 @@ function buildFastKeymapResponse(request: Request): Response {
     return {
       getPhysicalLayouts: {
         activeLayoutIndex: 0,
-        layouts: [{ name: "Default", fp: 20, keys: [] }],
+        layouts: [
+          {
+            name: "Default",
+            fp: 20,
+            keys: [],
+            defaultWidth: 0,
+            defaultHeight: 0,
+          },
+        ],
       },
     };
   }
@@ -116,7 +125,13 @@ function buildFastKeymapResponse(request: Request): Response {
     return {
       getPhysicalLayout: {
         index: request.getPhysicalLayout.layoutIndex,
-        layout: { name: "Default", fp: 20, keys: [] },
+        layout: {
+          name: "Default",
+          fp: 20,
+          keys: [],
+          defaultWidth: 0,
+          defaultHeight: 0,
+        },
       },
     };
   }

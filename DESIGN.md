@@ -151,16 +151,27 @@ message is fine and simpler than app-level paging.
 ## 4. Fingerprints (cache keys) — internal, independent of wire format
 
 Compute with `crc32_ieee_update` (`zephyr/sys/crc.h`, seed 0) over a **canonical
-little-endian byte serialization** of each group, then **truncate to the low
-16 bits** (`fk_fp16()`) before serving/caching/chaining — so the `uint32` fp
-fields on the wire stay ≤3-byte varints. This canonical form is an INTERNAL
-hashing input — it is not the wire format and never leaves the device except as
-the resulting 16-bit value. Computed on demand (cheap; a few hundred bindings =
-microseconds), no persistence. The 16-bit width trades a small `def_fp`
-collision chance (~0.7 % per device at ~30 behaviors → at worst one behavior's
-metadata mis-resolved from the bundle, never a crash) for the byte savings;
-`docs/protocol.md` has the exact math. Widening back to 32 bits is a
-`FK_DEFINITION_VERSION` bump.
+little-endian byte serialization** of each group, then **truncate** before
+serving/caching/chaining so the `uint32` fp fields on the wire stay short
+varints. This canonical form is an INTERNAL hashing input — it is not the wire
+format and never leaves the device except as the (truncated) result. Computed
+on demand (cheap; a few hundred bindings = microseconds), no persistence.
+
+Truncation widths (see `docs/protocol.md` for the exact rationale/math):
+
+- **Opaque fps** → **low 16 bits** (`fk_fp16()`). They only gate a cache
+  refetch, so a 16-bit collision is harmless.
+- **`def_fp`** → a **device-adaptive width** (16/24/32 bits): the smallest at
+  which every behavior on the device has a distinct `def_fp`
+  (`fk_def_fp_bits()`, reported in `Snapshot.def_fp_bits`). A `def_fp` match
+  lets the web *skip fetching* a behavior's metadata, so a collision there
+  mis-resolves it — choosing the width for on-device uniqueness makes
+  device-internal `def_fp` collisions impossible while almost always staying at
+  16 bits. The web masks its bundle/cache keys to `def_fp_bits` and treats a
+  masked key shared by two different bundle entries as a miss (forcing a
+  fetch); the only residual is a *custom* behavior colliding with an
+  *uninstalled* bundled behavior (≈0.04 % at 16 bits). Reverting to a fixed
+  32-bit `def_fp` is a `FK_DEFINITION_VERSION` bump.
 
 Canonicalization must be **identical in firmware and in the web bundle** for
 the one group the web actually reproduces locally: per-behavior `def_fp`
@@ -303,9 +314,17 @@ the behaviors pattern — fetch a slim summary, pull geometry only when needed:
 
 - `get_physical_layouts { LayoutDetailsMode details }` (`NONE`/`ALL`) →
   `PhysicalLayoutsResponse { active_layout_index, repeated PhysicalLayoutSummary
-  layouts }`, `PhysicalLayoutSummary { name, fp, [keys] }`. In `NONE` (default)
-  each summary is just `name + fp` (the geometry `keys` are omitted → free under
-  proto3). `ALL` inlines every layout's `keys` (one-shot convenience).
+  layouts }`, `PhysicalLayoutSummary { name, fp, [keys], default_width,
+  default_height }`. In `NONE` (default) each summary is just `name + fp` (the
+  geometry `keys` are omitted → free under proto3). `ALL` inlines every layout's
+  `keys` (one-shot convenience).
+- **Width/height hoist:** almost every key on a board shares one size (e.g.
+  100×100), so `keys` are encoded with the common `width`/`height` hoisted to
+  `PhysicalLayoutSummary.default_width`/`default_height` and each matching key's
+  own `width`/`height` omitted (encoded 0 — a real key is never 0-sized; the
+  web restores them). This roughly halves a uniform 42-key layout's geometry
+  bytes (measured 558→304 B). It's a pure wire encoding: the per-layout `fp`
+  still hashes each key's true `width`/`height`.
 - `get_physical_layout { layout_index }` →
   `PhysicalLayoutResponse { index, PhysicalLayoutSummary layout }` with `keys`
   populated — a single layout's geometry on demand.
@@ -323,8 +342,9 @@ per-layout cache, and `get_physical_layout(index)` (default: the active layout;
 others lazily, when a consumer needs their geometry). Cache each layout's
 `{name, fp, keys?}` by `fp`.
 
-`KeyPhysicalAttrs` and the per-key encoder are unchanged (copy the official
-encoder for the geometry); only the request/response framing changes.
+`KeyPhysicalAttrs` keeps the official field shape; the per-key encoder omits
+`width`/`height` that match the layout defaults (the hoist above), and the
+request/response framing changes.
 
 ## 7. RPC API (proto — adjust field numbers to satisfy nanopb)
 

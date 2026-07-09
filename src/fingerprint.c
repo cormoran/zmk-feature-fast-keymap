@@ -258,7 +258,10 @@ static void fk_def_fp_cache_insert(const struct device *dev, uint32_t fp) {
 }
 #endif /* CONFIG_ZMK_FAST_KEYMAP_FP_CACHE */
 
-uint32_t fk_fp_behavior_def(const struct device *dev) {
+/* The FULL 32-bit def_fp (the memoized value; see the cache above). The
+ * served def_fp is this masked to fk_def_fp_bits() -- see fk_fp_behavior_def()
+ * below. */
+static uint32_t fk_fp_behavior_def_full(const struct device *dev) {
 #if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
     uint32_t cached;
     if (fk_def_fp_cache_lookup(dev, &cached)) {
@@ -266,13 +269,89 @@ uint32_t fk_fp_behavior_def(const struct device *dev) {
     }
 #endif
 
-    uint32_t fp = fk_fp16(crc_behavior_def_preimage(0, dev));
+    uint32_t fp = crc_behavior_def_preimage(0, dev);
 
 #if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
     fk_def_fp_cache_insert(dev, fp);
 #endif
 
     return fp;
+}
+
+/* -- def_fp width (fk_def_fp_bits) --
+ *
+ * Every fp is normally served 16-bit (fk_fp16) to keep the wire varints
+ * short. For def_fp that risks two DISTINCT behaviors on the SAME device
+ * colliding on their low 16 bits, which would make the web resolve one of
+ * them to the other's bundle/cache entry (wrong metadata). To avoid that
+ * without paying full 32-bit on every device, pick the smallest width (16,
+ * 24, or 32 bits) at which this device's behaviors are all distinct, serve
+ * every def_fp masked to it, and report the width in Snapshot.def_fp_bits so
+ * the web can mask its bundle/cache keys identically. Almost every board is
+ * already collision-free at 16 bits, so this only ever widens the unlucky
+ * one -- and only that device pays the extra byte(s).
+ *
+ * Two behaviors with byte-identical alias+display_name+metadata legitimately
+ * share a full def_fp; that is NOT a harmful collision (they resolve to the
+ * same, correct definition), so it never forces a wider width. Immutable once
+ * local_ids settle (def_fp depends only on compile-time metadata), so cached
+ * forever like behaviors_fp when CONFIG_ZMK_FAST_KEYMAP_FP_CACHE is on. */
+static uint32_t fk_def_fp_mask(uint8_t bits) {
+    return bits >= 32 ? 0xFFFFFFFFu : ((1u << bits) - 1u);
+}
+
+static bool fk_def_fps_unique_at(uint8_t bits) {
+    uint32_t mask = fk_def_fp_mask(bits);
+
+    STRUCT_SECTION_FOREACH(zmk_behavior_local_id_map, a) {
+        uint32_t full_a = fk_fp_behavior_def_full(a->device);
+
+        STRUCT_SECTION_FOREACH(zmk_behavior_local_id_map, b) {
+            if (b == a) {
+                break; /* only compare each unordered pair once */
+            }
+            uint32_t full_b = fk_fp_behavior_def_full(b->device);
+            /* A masked clash between two behaviors whose full def_fps differ
+             * is the harmful case; equal full def_fps are identical content
+             * and resolve correctly, so they don't force a wider width. */
+            if ((full_a & mask) == (full_b & mask) && full_a != full_b) {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
+static bool fk_def_fp_bits_valid;
+static uint8_t fk_def_fp_bits_cache;
+#endif
+
+uint8_t fk_def_fp_bits(void) {
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
+    if (fk_def_fp_bits_valid) {
+        return fk_def_fp_bits_cache;
+    }
+#endif
+
+    uint8_t bits = 16;
+    if (!fk_def_fps_unique_at(16)) {
+        bits = 24;
+        if (!fk_def_fps_unique_at(24)) {
+            bits = 32;
+        }
+    }
+
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
+    fk_def_fp_bits_cache = bits;
+    fk_def_fp_bits_valid = true;
+#endif
+    return bits;
+}
+
+uint32_t fk_fp_behavior_def(const struct device *dev) {
+    return fk_fp_behavior_def_full(dev) & fk_def_fp_mask(fk_def_fp_bits());
 }
 
 /* -- behaviors_fp cache --

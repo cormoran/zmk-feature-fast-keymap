@@ -63,6 +63,11 @@ message Snapshot {
     uint32 available_layers = 8;
     uint32 active_layout_index = 9;
     repeated LayerFingerprint layers = 10;
+    // Width (bits) def_fp is served at on this device: the smallest of 16/24/32
+    // at which every behavior's def_fp stays distinct (SS4). The web masks its
+    // bundle/cache def_fp keys to this width. 0 is treated as 16 for backward
+    // compatibility.
+    uint32 def_fp_bits = 11;
 }
 
 message LayerFingerprint {
@@ -204,6 +209,17 @@ message PhysicalLayoutSummary {
     string name = 1;
     uint32 fp = 2; // per-layout fingerprint, device-opaque (SS4/SS6)
     repeated KeyPhysicalAttrs keys = 3;
+
+    // Almost every key on a board shares one width/height (e.g. 100x100), so
+    // the firmware hoists the common size here and omits each key's
+    // width/height when it matches -- a KeyPhysicalAttrs with width/height 0
+    // means "use these defaults" (a real key is never 0-sized). Saves ~6 B
+    // per key on a uniform board (SS6). Only populated alongside `keys`
+    // (LAYOUT_DETAILS_ALL / get_physical_layout); the fp still hashes each
+    // key's true width/height, so this is a pure wire encoding, not a data
+    // change.
+    sint32 default_width = 4;
+    sint32 default_height = 5;
 }
 
 message KeyPhysicalAttrs {

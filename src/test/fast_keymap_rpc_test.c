@@ -396,6 +396,29 @@ static uint32_t test_crc_str8(uint32_t seed, const char *s) {
     return seed;
 }
 
+/* The width the device serves def_fp at (Snapshot.def_fp_bits /
+ * fk_def_fp_bits()); recompute_def_fp() masks its full result to this so it
+ * matches BehaviorSummary.def_fp exactly. Refreshed by
+ * sync_served_def_fp_bits() before each test that recomputes. */
+static uint8_t g_served_def_fp_bits = 16;
+
+static uint32_t mask_to_bits(uint32_t v, uint8_t bits) {
+    return bits >= 32 ? v : (v & ((1u << bits) - 1u));
+}
+
+static void sync_served_def_fp_bits(void) {
+    cormoran_fast_keymap_Request req = cormoran_fast_keymap_Request_init_zero;
+    req.which_request_type = cormoran_fast_keymap_Request_get_snapshot_tag;
+    req.request_type.get_snapshot = true;
+
+    cormoran_fast_keymap_Response resp = cormoran_fast_keymap_Response_init_zero;
+    if (call_fast_keymap_rpc(&req, &resp) &&
+        resp.which_response_type == cormoran_fast_keymap_Response_snapshot_tag) {
+        uint32_t bits = resp.response_type.snapshot.def_fp_bits;
+        g_served_def_fp_bits = bits ? (uint8_t)bits : 16;
+    }
+}
+
 static uint32_t recompute_def_fp(const char *alias, const char *display_name,
                                  const param_set_capture_t *metadata) {
     uint32_t seed = 0;
@@ -420,10 +443,10 @@ static uint32_t recompute_def_fp(const char *alias, const char *display_name,
 
     seed = test_crc_str16(seed, alias);
     seed = test_crc_str16(seed, display_name);
-    /* def_fp is served truncated to 16 bits (fk_fp16() in fingerprint.c /
-     * FK_DEFINITION_VERSION v2); mirror that here so this stand-in for the
-     * web recompute matches BehaviorSummary.def_fp. */
-    return seed & 0xFFFFu;
+    /* def_fp is served truncated to the device-adaptive width
+     * (fk_def_fp_bits() / Snapshot.def_fp_bits); mirror that here so this
+     * stand-in for the web recompute matches BehaviorSummary.def_fp. */
+    return mask_to_bits(seed, g_served_def_fp_bits);
 }
 
 struct behavior_summary_entry {
@@ -752,6 +775,8 @@ static int test_list_behaviors_modes_and_def_fp(void) {
     all_cap = (behavior_summary_capture_t){0};
     custom_cap = (behavior_summary_capture_t){0};
 
+    sync_served_def_fp_bits();
+
     if (!call_list_behaviors(cormoran_fast_keymap_BehaviorDetailsMode_BEHAVIOR_DETAILS_NONE,
                              &none_cap) ||
         !call_list_behaviors(cormoran_fast_keymap_BehaviorDetailsMode_BEHAVIOR_DETAILS_ALL,
@@ -914,6 +939,8 @@ static int test_list_behaviors_modes_and_def_fp(void) {
  * unknown id yields no entry (this handler's chosen "skip unknown ids"
  * behavior -- the response still succeeds for the ids that do resolve). */
 static int test_get_behaviors_batch(void) {
+    sync_served_def_fp_bits();
+
     static behavior_summary_capture_t list_cap;
     list_cap = (behavior_summary_capture_t){0};
     if (!call_list_behaviors(cormoran_fast_keymap_BehaviorDetailsMode_BEHAVIOR_DETAILS_ALL,
