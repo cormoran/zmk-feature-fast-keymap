@@ -329,4 +329,24 @@ describe("runBenchmark", () => {
       result.fastKeymap.initial.rpcCalls
     );
   });
+
+  it("forwards the field-selection options to the fast-keymap load requests", async () => {
+    mockOfficialSuccess();
+    const connection = createMockConnection();
+    const requests: Request[] = [];
+    const recordingCall: FastKeymapCall = async (request) => {
+      requests.push(request);
+      return buildFastKeymapResponse(request);
+    };
+
+    await runBenchmark(recordingCall, connection, {
+      deviceKey: "field-selection",
+      includeAliases: false,
+      includeDisplayNames: false,
+    });
+
+    const listReq = requests.find((r) => r.listBehaviors)?.listBehaviors;
+    expect(listReq?.includeAlias).toBe(false);
+    expect(listReq?.excludeDisplayName).toBe(true);
+  });
 });

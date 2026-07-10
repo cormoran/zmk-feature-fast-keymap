@@ -80,6 +80,30 @@
   margin-top: 1.5rem;
 }
 
+.benchmark-options {
+  margin: 0.75rem 0 1rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+}
+
+.benchmark-options legend {
+  padding: 0 0.4rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.benchmark-options label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin: 0.2rem 0;
+}
+
+.benchmark-options .hint-message {
+  margin: 0.4rem 0 0;
+}
+
 .benchmark-table {
   width: 100%;
   margin-top: 1rem;
