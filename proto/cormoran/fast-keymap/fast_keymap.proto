@@ -21,6 +21,7 @@ message Request {
         GetLayerRequest get_edited_layer = 6;               // diff current vs default
         GetPhysicalLayoutsRequest get_physical_layouts = 7; // slim summary (+ optional geometry)
         GetPhysicalLayoutRequest get_physical_layout = 8;   // one layout's geometry
+        GetLayersRequest get_layers = 9;                    // batch current/effective (cold load)
     }
 }
 
@@ -35,10 +36,22 @@ message Response {
         EditedLayer get_edited_layer = 7;
         PhysicalLayoutsResponse get_physical_layouts = 8;
         PhysicalLayoutResponse get_physical_layout = 9;
+        GetLayersResponse get_layers = 10;
     }
 }
 
 message GetLayerRequest { uint32 layer_id = 1; }
+
+// Batch fetch of several layers' current/effective bindings in one round-trip
+// (DESIGN.md SS7). On a cold load a client wants every layer at once, and one
+// get_layer per layer is more round-trips than the whole keymap needs -- this
+// collapses them. Unknown/invalid ids are skipped (like get_behaviors), not an
+// error. `layer_ids` is bounded (max_count:32, fits the RX buffer); chunk more.
+message GetLayersRequest {
+    repeated uint32 layer_ids = 1;
+}
+
+message GetLayersResponse { repeated Layer layers = 1; }
 
 enum ErrorCode {
     ERR_GENERIC = 0;

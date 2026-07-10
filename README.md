@@ -28,6 +28,9 @@ every connect. This module instead **sends less**:
 3. **Default keymap + edited-only diff.** The compiled-in ("stock") keymap only
    changes when you reflash, so the client caches it and then fetches just the
    handful of positions you actually edited (`get_edited_layer`).
+4. **Batched cold load.** Over slow BLE the initial load is dominated by
+   per-request round-trips, so on a cold cache the client pulls every layer's
+   bindings in one `get_layers` batch instead of one request per layer.
 
 The wire format deliberately mimics ZMK's official protobuf messages (no bespoke
 byte-packing; the RPC response streams, so there is no app-level chunking). The

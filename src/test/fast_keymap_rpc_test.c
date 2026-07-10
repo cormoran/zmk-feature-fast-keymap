@@ -239,6 +239,38 @@ static bool decode_binding_cb(pb_istream_t *stream, const pb_field_t *field, voi
     return true;
 }
 
+/* One entry per Layer in a GetLayersResponse: its id plus its decoded
+ * bindings (each Layer submessage decoded with decode_binding_cb into its own
+ * capture). */
+struct layers_entry {
+    uint32_t id;
+    binding_capture_t bindings;
+};
+typedef CAPTURE_ARRAY(struct layers_entry, ZMK_KEYMAP_LAYERS_LEN) layers_capture_t;
+
+static bool decode_layers_cb(pb_istream_t *stream, const pb_field_t *field, void **arg) {
+    ARG_UNUSED(field);
+    layers_capture_t *cap = *arg;
+    if (cap->count >= ARRAY_SIZE(cap->entries)) {
+        LOG_ERR("too many layers in get_layers response for test capture");
+        return false;
+    }
+
+    struct layers_entry *e = &cap->entries[cap->count];
+    e->bindings = (binding_capture_t){0};
+
+    cormoran_fast_keymap_Layer lyr = cormoran_fast_keymap_Layer_init_zero;
+    lyr.bindings.funcs.decode = decode_binding_cb;
+    lyr.bindings.arg = &e->bindings;
+    if (!pb_decode(stream, cormoran_fast_keymap_Layer_fields, &lyr)) {
+        return false;
+    }
+
+    e->id = lyr.id;
+    cap->count++;
+    return true;
+}
+
 struct edited_entry {
     uint32_t position;
     cormoran_fast_keymap_BehaviorBinding binding;
@@ -730,6 +762,80 @@ static int test_get_layer_matches_live_keymap(void) {
     }
 
     LOG_INF("PASS: fast_keymap_get_layer_matches_live_keymap");
+    return 0;
+}
+
+/* get_layers batches several layers' effective bindings in one response
+ * (DESIGN.md SS7): request layers 0 and 1 plus an invalid id, and assert the
+ * batch returns exactly the two valid layers (invalid skipped) with bindings
+ * identical to the live keymap -- the same property test_get_layer_matches_
+ * live_keymap() checks per single-layer call. */
+static int test_get_layers_batch(void) {
+    cormoran_fast_keymap_Request req = cormoran_fast_keymap_Request_init_zero;
+    req.which_request_type = cormoran_fast_keymap_Request_get_layers_tag;
+    req.request_type.get_layers =
+        (cormoran_fast_keymap_GetLayersRequest)cormoran_fast_keymap_GetLayersRequest_init_zero;
+    req.request_type.get_layers.layer_ids_count = 3;
+    req.request_type.get_layers.layer_ids[0] = 0;
+    req.request_type.get_layers.layer_ids[1] = 1;
+    req.request_type.get_layers.layer_ids[2] = 250; /* invalid -> skipped */
+
+    static layers_capture_t cap;
+    cap = (layers_capture_t){0};
+
+    cormoran_fast_keymap_Response resp = cormoran_fast_keymap_Response_init_zero;
+    resp.which_response_type = cormoran_fast_keymap_Response_get_layers_tag;
+    resp.response_type.get_layers =
+        (cormoran_fast_keymap_GetLayersResponse)cormoran_fast_keymap_GetLayersResponse_init_zero;
+    resp.response_type.get_layers.layers.funcs.decode = decode_layers_cb;
+    resp.response_type.get_layers.layers.arg = &cap;
+
+    if (!call_fast_keymap_rpc(&req, &resp)) {
+        return -EINVAL;
+    }
+    if (resp.which_response_type != cormoran_fast_keymap_Response_get_layers_tag) {
+        LOG_ERR("get_layers unexpected response type %d", resp.which_response_type);
+        return -EINVAL;
+    }
+    if (cap.count != 2) {
+        LOG_ERR("get_layers returned %u layers, expected 2 (invalid id skipped)",
+                (unsigned int)cap.count);
+        return -EINVAL;
+    }
+
+    for (size_t i = 0; i < cap.count; i++) {
+        const struct layers_entry *e = &cap.entries[i];
+        if (e->id != 0 && e->id != 1) {
+            LOG_ERR("get_layers returned unexpected layer id %u", e->id);
+            return -EINVAL;
+        }
+        if (e->bindings.count != ZMK_KEYMAP_LEN) {
+            LOG_ERR("get_layers layer %u returned %u bindings, expected %d", e->id,
+                    (unsigned int)e->bindings.count, ZMK_KEYMAP_LEN);
+            return -EINVAL;
+        }
+
+        for (uint16_t b = 0; b < ZMK_KEYMAP_LEN; b++) {
+            const struct zmk_behavior_binding *live =
+                zmk_keymap_get_layer_binding_at_idx(e->id, b);
+            int32_t want_id = -1;
+            uint32_t want_p1 = 0, want_p2 = 0;
+            if (live && live->behavior_dev) {
+                want_id = zmk_behavior_get_local_id(live->behavior_dev);
+                want_p1 = live->param1;
+                want_p2 = live->param2;
+            }
+
+            const cormoran_fast_keymap_BehaviorBinding *got = &e->bindings.entries[b];
+            if (got->behavior_id != want_id || got->param1 != want_p1 || got->param2 != want_p2) {
+                LOG_ERR("get_layers layer %u binding %d mismatch: got id=%d p1=%u p2=%u", e->id, b,
+                        got->behavior_id, got->param1, got->param2);
+                return -EINVAL;
+            }
+        }
+    }
+
+    LOG_INF("PASS: fast_keymap_get_layers_batch");
     return 0;
 }
 
@@ -1526,6 +1632,11 @@ static int fast_keymap_rpc_test_init(void) {
     }
 
     ret = test_get_layer_matches_live_keymap();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_get_layers_batch();
     if (ret < 0) {
         return ret;
     }

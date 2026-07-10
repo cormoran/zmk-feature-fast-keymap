@@ -101,6 +101,18 @@ function buildResponse(request: Request): Response {
       },
     };
   }
+  if (request.getLayers) {
+    // Cold load batches every layer's effective bindings in one call (SS7).
+    return {
+      getLayers: {
+        layers: request.getLayers.layerIds.map((id) => ({
+          id,
+          name: "Base",
+          bindings: [{ behaviorId: 1, param1: 4, param2: 0 }],
+        })),
+      },
+    };
+  }
   if (request.getPhysicalLayouts) {
     return {
       getPhysicalLayouts: {

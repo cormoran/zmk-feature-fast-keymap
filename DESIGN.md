@@ -365,6 +365,7 @@ Request.oneof:
   GetLayerRequest{u32 layer_id}     get_edited_layer       = 6   // diff current vs default
   GetPhysicalLayoutsRequest         get_physical_layouts   = 7   // slim summary (+ optional geometry)
   GetPhysicalLayoutRequest          get_physical_layout    = 8   // one layout's geometry
+  GetLayersRequest{repeated ids}    get_layers             = 9   // batch current/effective (cold load)
 
 Response.oneof:
   ErrorResponse{ErrorCode code}     error                  = 1
@@ -376,6 +377,7 @@ Response.oneof:
   EditedLayer                       get_edited_layer       = 7
   PhysicalLayoutsResponse           get_physical_layouts   = 8
   PhysicalLayoutResponse            get_physical_layout    = 9
+  GetLayersResponse{repeated Layer} get_layers             = 10
 
 Snapshot:
   u32 definition_version, behaviors_fp, default_keymap_fp, keymap_fp,
@@ -415,6 +417,10 @@ Layer:            u32 id; string name; repeated BehaviorBinding bindings
 EditedBinding:    u32 position; BehaviorBinding binding
 EditedLayer:      u32 id; repeated EditedBinding bindings
 
+// batch effective/current layers in one round-trip (cold load)
+GetLayersRequest:  repeated u32 layer_ids       // .options max_count:32 (fits RX buf)
+GetLayersResponse: repeated Layer layers        // callback-encoded; unknown ids skipped
+
 // physical layouts: slim summary + on-demand geometry (§6)
 enum LayoutDetailsMode: NONE = 0; ALL = 1
 GetPhysicalLayoutsRequest:  LayoutDetailsMode details
@@ -436,6 +442,18 @@ specific `ErrorCode`. `get_edited_layer`/`get_default_layer` and the
 `CONFIG_ZMK_KEYMAP_SETTINGS_STORAGE` is off (default == current; see §2).
 `get_physical_layout` with an out-of-range `layout_index` → `ErrorResponse
 ERR_INVALID_LAYOUT`.
+
+**`get_layers` (batch, cold-load latency).** Initial load is dominated by
+per-RPC round-trip latency over BLE, not bytes, and one `get_layer` per layer
+is *more* round-trips than the whole keymap needs (the official `getKeymap`
+returns every layer in one call). So the web fetches all the layers it can't
+serve from cache in a **single** `get_layers { layer_ids }` → `repeated Layer`
+call, cutting an N-layer cold load from `N+…` round-trips to a handful. Unknown
+ids are skipped (like `get_behaviors`). The per-layer `get_layer` /
+`get_default_layer` + `get_edited_layer` diff path is kept for *warm*
+incremental updates (reuse a cached default, fetch only the small edited diff);
+`get_layers` returns effective bindings directly, which is the cheaper choice
+when there's no cached default to diff against.
 
 ## 8. Config / buffers
 
@@ -464,7 +482,7 @@ ERR_INVALID_LAYOUT`.
   is needed. Leave it at the ZMK default unless throughput profiling says
   otherwise; a modest bump (e.g. 256) means fewer transport flushes. Document
   it as a throughput knob, not a correctness limit.
-- `FK_DEFINITION_VERSION` C macro = **1**, mirrored as a TS constant in the
+- `FK_DEFINITION_VERSION` C macro = **2**, mirrored as a TS constant in the
   web bundle.
 
 ## 9. Phase plan (delegate B/C/D to Sonnet; verify between phases)

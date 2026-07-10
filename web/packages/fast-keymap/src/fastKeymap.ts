@@ -28,6 +28,11 @@ import { FK_DEFINITION_VERSION, bundledByDefFp } from "./standardBehaviors";
  * multiple `get_behaviors` round-trips of at most this many ids each. */
 const GET_BEHAVIORS_CHUNK_SIZE = 32;
 
+/** Batch size for `get_layers` (DESIGN.md SS7): `GetLayersRequest.layer_ids`
+ * is bounded `max_count:32` on the firmware for the same RX-buffer reason as
+ * `get_behaviors`, so chunk any larger set of layers to fetch. */
+const GET_LAYERS_CHUNK_SIZE = 32;
+
 /** Matches `useCustomSubsystem(...).call` -- see web/src/App.tsx. */
 export type FastKeymapCall = (request: Request) => Promise<Response | null>;
 
@@ -115,8 +120,9 @@ export interface FastKeymapLoadStats {
   /** Layers whose whole effective binding list came from the cache (`fp`
    * match, zero RPCs). */
   layersFromCache: number;
-  /** Layers fetched whole via `get_layer` (no edits vs. default, or no
-   * usable default cache -- see loadLayers()). */
+  /** Layers whose whole effective bindings were fetched (no usable default
+   * cache to diff against) -- pulled together in one batched `get_layers`
+   * round-trip on a cold load; see loadLayers(). */
   layersFetchedFull: number;
   /** Layers assembled from a (possibly cached) default layer plus a
    * `get_edited_layer` diff. */
@@ -583,81 +589,108 @@ async function loadLayers(
   fetchedFullCount: number;
   fetchedDiffCount: number;
 }> {
-  const layers: FastKeymapLayer[] = [];
+  const layers: FastKeymapLayer[] = new Array(snapshot.layers.length);
   let fromCacheCount = 0;
   let fetchedFullCount = 0;
   let fetchedDiffCount = 0;
 
-  for (const layerFingerprint of snapshot.layers) {
-    const layerKey = FastKeymapCacheKeys.layer(deviceKey, layerFingerprint.fp);
+  const makeLayer = (
+    lf: Snapshot["layers"][number],
+    bindings: FastKeymapBinding[],
+    loadedFromCache: boolean
+  ): FastKeymapLayer => ({
+    id: lf.id,
+    name: lf.name,
+    bindingCount: lf.bindingCount,
+    editedCount: lf.editedCount,
+    bindings,
+    loadedFromCache,
+  });
+
+  // Layers that couldn't be resolved from a cache and so need a full
+  // effective-binding fetch -- collected here and pulled in ONE batched
+  // `get_layers` round-trip (chunked) instead of one `get_layer` each, which
+  // matters most on a cold load where every layer lands here (DESIGN.md SS7).
+  const pending: { index: number; lf: Snapshot["layers"][number] }[] = [];
+
+  for (let index = 0; index < snapshot.layers.length; index++) {
+    const lf = snapshot.layers[index];
+    const layerKey = FastKeymapCacheKeys.layer(deviceKey, lf.fp);
     const defaultKey = FastKeymapCacheKeys.defaultLayer(
       deviceKey,
-      layerFingerprint.defaultFp
+      lf.defaultFp
     );
 
     const cachedCurrent = readCache<FastKeymapBinding[]>(storage, layerKey);
     if (cachedCurrent) {
       fromCacheCount++;
-      layers.push({
-        id: layerFingerprint.id,
-        name: layerFingerprint.name,
-        bindingCount: layerFingerprint.bindingCount,
-        editedCount: layerFingerprint.editedCount,
-        bindings: cachedCurrent,
-        loadedFromCache: true,
-      });
+      layers[index] = makeLayer(lf, cachedCurrent, true);
       continue;
     }
 
-    let bindings: FastKeymapBinding[];
-
-    if (layerFingerprint.fp === layerFingerprint.defaultFp) {
-      // Current == default content (no edits on this layer): a cached
-      // default (possibly written while loading a different layer that
-      // shares the same default_fp) can serve directly; otherwise a single
-      // get_layer call is cheaper than get_default_layer + get_edited_layer.
-      const cachedDefault = readCache<FastKeymapBinding[]>(storage, defaultKey);
-      if (cachedDefault) {
-        bindings = cachedDefault;
-      } else {
-        const response = await callChecked(call, {
-          getLayer: { layerId: layerFingerprint.id },
-        });
-        bindings = toFastBindings(response.getLayer?.bindings ?? []);
-        writeCache(storage, defaultKey, bindings);
-        fetchedFullCount++;
+    // A cached default (from a prior load, possibly written while loading a
+    // sibling layer sharing this default_fp) lets us avoid the batch fetch:
+    // an unedited layer reuses it directly, an edited one overlays a small
+    // `get_edited_layer` diff. Without one, fall through to the batch.
+    const cachedDefault = readCache<FastKeymapBinding[]>(storage, defaultKey);
+    if (cachedDefault) {
+      if (lf.fp === lf.defaultFp) {
+        writeCache(storage, layerKey, cachedDefault);
+        layers[index] = makeLayer(lf, cachedDefault, false);
+        continue;
       }
-    } else {
-      let defaultBindings = readCache<FastKeymapBinding[]>(storage, defaultKey);
-      if (!defaultBindings) {
-        const response = await callChecked(call, {
-          getDefaultLayer: { layerId: layerFingerprint.id },
-        });
-        defaultBindings = toFastBindings(
-          response.getDefaultLayer?.bindings ?? []
-        );
-        writeCache(storage, defaultKey, defaultBindings);
-      }
-
       const editedResponse = await callChecked(call, {
-        getEditedLayer: { layerId: layerFingerprint.id },
+        getEditedLayer: { layerId: lf.id },
       });
-      bindings = overlayEdits(
-        defaultBindings,
+      const bindings = overlayEdits(
+        cachedDefault,
         editedResponse.getEditedLayer?.bindings ?? []
       );
+      writeCache(storage, layerKey, bindings);
       fetchedDiffCount++;
+      layers[index] = makeLayer(lf, bindings, false);
+      continue;
     }
 
-    writeCache(storage, layerKey, bindings);
-    layers.push({
-      id: layerFingerprint.id,
-      name: layerFingerprint.name,
-      bindingCount: layerFingerprint.bindingCount,
-      editedCount: layerFingerprint.editedCount,
-      bindings,
-      loadedFromCache: false,
+    pending.push({ index, lf });
+  }
+
+  // Batch-fetch every remaining layer's effective bindings. `get_layers`
+  // returns current bindings directly, so on a cold load (no cached default
+  // to diff against) this is both fewer round-trips AND fewer than the old
+  // get_default_layer + get_edited_layer pair per edited layer.
+  for (const group of chunk(pending, GET_LAYERS_CHUNK_SIZE)) {
+    const response = await callChecked(call, {
+      getLayers: { layerIds: group.map((p) => p.lf.id) },
     });
+    const bindingsById = new Map(
+      (response.getLayers?.layers ?? []).map((l) => [
+        l.id,
+        toFastBindings(l.bindings),
+      ])
+    );
+
+    for (const { index, lf } of group) {
+      // A layer the device didn't return (shouldn't happen -- ids come from
+      // the snapshot) falls back to empty rather than leaving a hole.
+      const bindings = bindingsById.get(lf.id) ?? [];
+      writeCache(
+        storage,
+        FastKeymapCacheKeys.layer(deviceKey, lf.fp),
+        bindings
+      );
+      // Unedited layer: its effective bindings ARE the default, so seed the
+      // default cache too (lets a sibling / a later edit reuse it).
+      if (lf.fp === lf.defaultFp) {
+        writeCache(
+          storage,
+          FastKeymapCacheKeys.defaultLayer(deviceKey, lf.defaultFp),
+          bindings
+        );
+      }
+      fetchedFullCount++;
+      layers[index] = makeLayer(lf, bindings, false);
+    }
   }
 
   return { layers, fromCacheCount, fetchedFullCount, fetchedDiffCount };

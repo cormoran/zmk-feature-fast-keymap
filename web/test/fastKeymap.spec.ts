@@ -274,6 +274,23 @@ function makeDeviceCall(
         `unexpected get_edited_layer(${request.getEditedLayer.layerId})`
       );
     }
+    if (request.getLayers) {
+      // Batch effective/current bindings per requested id (SS7): layer 0 is
+      // unedited (effective == default), layer 1 is edited (effective ==
+      // default overlaid with its edits). Unknown ids are skipped.
+      const effective: Record<number, { name: string; bindings: unknown[] }> = {
+        0: { name: "Base", bindings: BASE_DEFAULT_BINDINGS },
+        1: { name: "Fn", bindings: FN_EFFECTIVE_BINDINGS },
+      };
+      return {
+        getLayers: {
+          layers: request.getLayers.layerIds.flatMap((id) => {
+            const l = effective[id];
+            return l ? [{ id, name: l.name, bindings: l.bindings }] : [];
+          }),
+        },
+      };
+    }
     if (request.getPhysicalLayouts) {
       // Mirrors the firmware: NONE mode never inlines `keys` (SS6) --
       // strip any test-fixture geometry so a bug that regresses to always
@@ -348,15 +365,14 @@ describe("loadFastKeymap", () => {
 
     // get_snapshot, list_behaviors(CUSTOM, first connect -> empty cache),
     // (kp resolves from bundle, my_custom is inlined by CUSTOM mode -- no
-    // get_behaviors needed), get_layer(0), get_default_layer(1),
-    // get_edited_layer(1), get_physical_layouts(NONE) + get_physical_layout
-    // for the active (only) layout, whose geometry isn't cached yet.
+    // get_behaviors needed), a single batched get_layers([0,1]) for both
+    // layers' effective bindings (no cached defaults to diff against),
+    // get_physical_layouts(NONE) + get_physical_layout for the active (only)
+    // layout, whose geometry isn't cached yet.
     expect(requestKinds(requests)).toEqual([
       "getSnapshot",
       "listBehaviors",
-      "getLayer",
-      "getDefaultLayer",
-      "getEditedLayer",
+      "getLayers",
       "getPhysicalLayouts",
       "getPhysicalLayout",
     ]);
@@ -388,8 +404,8 @@ describe("loadFastKeymap", () => {
       behaviorsCached: 0,
       behaviorsFetched: 1,
       layersFromCache: 0,
-      layersFetchedFull: 1,
-      layersFetchedDiff: 1,
+      layersFetchedFull: 2,
+      layersFetchedDiff: 0,
       physicalLayoutsFromCache: false,
     });
   });

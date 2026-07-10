@@ -593,6 +593,69 @@ static int handle_get_edited_layer(uint32_t layer_id, cormoran_fast_keymap_Respo
     return 0;
 }
 
+/* -- get_layers (batch current/effective, DESIGN.md SS7) --------------- */
+
+/* Copied out of the request into static storage before returning, same
+ * reason as fk_get_behaviors_req: encode_layers() runs after
+ * handle_get_layers() returns (SS3's size-pass/encode-pass). */
+static cormoran_fast_keymap_GetLayersRequest fk_get_layers_req;
+
+/* One persistent fk_layer_encode_arg per requested layer, so each Layer
+ * submessage's bindings callback reads the right layer_id across both encode
+ * passes (nanopb keeps the arg pointer, like fk_snapshot_layers). */
+static struct fk_layer_encode_arg fk_get_layers_args[ARRAY_SIZE(fk_get_layers_req.layer_ids)];
+
+static bool encode_layers(pb_ostream_t *stream, const pb_field_t *field, void *const *arg) {
+    const cormoran_fast_keymap_GetLayersRequest *req =
+        (const cormoran_fast_keymap_GetLayersRequest *)*arg;
+
+    for (pb_size_t i = 0; i < req->layer_ids_count; i++) {
+        uint32_t layer_id = req->layer_ids[i];
+        if (!layer_id_valid(layer_id)) {
+            /* Skip unknown/invalid ids rather than failing the whole batch,
+             * same as get_behaviors. */
+            LOG_WRN("get_layers: invalid layer_id %u, skipping", (unsigned int)layer_id);
+            continue;
+        }
+
+        if (!pb_encode_tag_for_field(stream, field)) {
+            return false;
+        }
+
+        fk_get_layers_args[i].layer_id = (zmk_keymap_layer_id_t)layer_id;
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER)
+        fk_get_layers_args[i].use_default = false; /* effective/current bindings */
+#endif
+
+        cormoran_fast_keymap_Layer lyr = cormoran_fast_keymap_Layer_init_zero;
+        lyr.id = layer_id;
+        lyr.name.funcs.encode = encode_layer_name;
+        lyr.name.arg = &fk_get_layers_args[i].layer_id;
+        lyr.bindings.funcs.encode = encode_layer_bindings;
+        lyr.bindings.arg = &fk_get_layers_args[i];
+
+        if (!pb_encode_submessage(stream, &cormoran_fast_keymap_Layer_msg, &lyr)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static int handle_get_layers(const cormoran_fast_keymap_GetLayersRequest *req,
+                             cormoran_fast_keymap_Response *resp) {
+    fk_get_layers_req = *req;
+
+    cormoran_fast_keymap_GetLayersResponse *out = &resp->response_type.get_layers;
+    *out =
+        (cormoran_fast_keymap_GetLayersResponse)cormoran_fast_keymap_GetLayersResponse_init_zero;
+    out->layers.funcs.encode = encode_layers;
+    out->layers.arg = &fk_get_layers_req;
+
+    resp->which_response_type = cormoran_fast_keymap_Response_get_layers_tag;
+    return 0;
+}
+
 /* -- get_physical_layouts ------------------------------------------- */
 
 static bool encode_layout_name(pb_ostream_t *stream, const pb_field_t *field, void *const *arg) {
@@ -791,6 +854,9 @@ static bool fast_keymap_rpc_handle_request(const zmk_custom_CallRequest *raw_req
         break;
     case cormoran_fast_keymap_Request_get_edited_layer_tag:
         rc = handle_get_edited_layer(req.request_type.get_edited_layer.layer_id, resp);
+        break;
+    case cormoran_fast_keymap_Request_get_layers_tag:
+        rc = handle_get_layers(&req.request_type.get_layers, resp);
         break;
     case cormoran_fast_keymap_Request_get_physical_layouts_tag:
         rc = handle_get_physical_layouts(req.request_type.get_physical_layouts.details, resp);
