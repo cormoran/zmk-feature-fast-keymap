@@ -151,10 +151,27 @@ message is fine and simpler than app-level paging.
 ## 4. Fingerprints (cache keys) — internal, independent of wire format
 
 Compute with `crc32_ieee_update` (`zephyr/sys/crc.h`, seed 0) over a **canonical
-little-endian byte serialization** of each group. This canonical form is an
-INTERNAL hashing input — it is not the wire format and never leaves the device
-except as the resulting `u32`. Computed on demand (cheap; a few hundred
-bindings = microseconds), no persistence.
+little-endian byte serialization** of each group, then **truncate** before
+serving/caching/chaining so the `uint32` fp fields on the wire stay short
+varints. This canonical form is an INTERNAL hashing input — it is not the wire
+format and never leaves the device except as the (truncated) result. Computed
+on demand (cheap; a few hundred bindings = microseconds), no persistence.
+
+Truncation widths (see `docs/protocol.md` for the exact rationale/math):
+
+- **Opaque fps** → **low 16 bits** (`fk_fp16()`). They only gate a cache
+  refetch, so a 16-bit collision is harmless.
+- **`def_fp`** → a **device-adaptive width** (16/24/32 bits): the smallest at
+  which every behavior on the device has a distinct `def_fp`
+  (`fk_def_fp_bits()`, reported in `Snapshot.def_fp_bits`). A `def_fp` match
+  lets the web *skip fetching* a behavior's metadata, so a collision there
+  mis-resolves it — choosing the width for on-device uniqueness makes
+  device-internal `def_fp` collisions impossible while almost always staying at
+  16 bits. The web masks its bundle/cache keys to `def_fp_bits` and treats a
+  masked key shared by two different bundle entries as a miss (forcing a
+  fetch); the only residual is a *custom* behavior colliding with an
+  *uninstalled* bundled behavior (≈0.04 % at 16 bits). Reverting to a fixed
+  32-bit `def_fp` is a `FK_DEFINITION_VERSION` bump.
 
 Canonicalization must be **identical in firmware and in the web bundle** for
 the one group the web actually reproduces locally: per-behavior `def_fp`
@@ -251,8 +268,18 @@ is `def_fp`.
 `details` is a `BehaviorDetails { display_name, alias, metadata }` where
 `metadata` is the **official** tree (`repeated BehaviorBindingParametersSet` of
 `BehaviorParameterValueDescription`, callback-encoded — copy the official
-encoder). It carries no fingerprint; the client recomputes `def_fp` from the
-served fields (guaranteeing both sides agree on the canonicalization).
+encoder). It carries no fingerprint (the client compares `BehaviorSummary.def_fp`).
+
+**Per-field selection.** Inside `details`, `metadata` is always present, but the
+two strings are opt-controlled to shave bytes when a consumer doesn't render
+them: `include_alias` (default **off** — the `&<alias>` token is only needed
+for display/export, and standard behaviors get it from the bundle) and
+`exclude_display_name` (default **off**, i.e. display_name is included — opt out
+to drop it). An omitted string is proto3's default `""`. Both are on
+`ListBehaviorsRequest` and `GetBehaviorsRequest`. `def_fp` still hashes the true
+alias + display_name regardless of what rides the wire, so field selection never
+changes a fingerprint (the web reproduces `def_fp` from its **bundle**, which
+always has both strings).
 
 `list_behaviors` takes a `BehaviorDetailsMode`:
 
@@ -297,9 +324,17 @@ the behaviors pattern — fetch a slim summary, pull geometry only when needed:
 
 - `get_physical_layouts { LayoutDetailsMode details }` (`NONE`/`ALL`) →
   `PhysicalLayoutsResponse { active_layout_index, repeated PhysicalLayoutSummary
-  layouts }`, `PhysicalLayoutSummary { name, fp, [keys] }`. In `NONE` (default)
-  each summary is just `name + fp` (the geometry `keys` are omitted → free under
-  proto3). `ALL` inlines every layout's `keys` (one-shot convenience).
+  layouts }`, `PhysicalLayoutSummary { name, fp, [keys], default_width,
+  default_height }`. In `NONE` (default) each summary is just `name + fp` (the
+  geometry `keys` are omitted → free under proto3). `ALL` inlines every layout's
+  `keys` (one-shot convenience).
+- **Width/height hoist:** almost every key on a board shares one size (e.g.
+  100×100), so `keys` are encoded with the common `width`/`height` hoisted to
+  `PhysicalLayoutSummary.default_width`/`default_height` and each matching key's
+  own `width`/`height` omitted (encoded 0 — a real key is never 0-sized; the
+  web restores them). This roughly halves a uniform 42-key layout's geometry
+  bytes (measured 558→304 B). It's a pure wire encoding: the per-layout `fp`
+  still hashes each key's true `width`/`height`.
 - `get_physical_layout { layout_index }` →
   `PhysicalLayoutResponse { index, PhysicalLayoutSummary layout }` with `keys`
   populated — a single layout's geometry on demand.
@@ -317,8 +352,9 @@ per-layout cache, and `get_physical_layout(index)` (default: the active layout;
 others lazily, when a consumer needs their geometry). Cache each layout's
 `{name, fp, keys?}` by `fp`.
 
-`KeyPhysicalAttrs` and the per-key encoder are unchanged (copy the official
-encoder for the geometry); only the request/response framing changes.
+`KeyPhysicalAttrs` keeps the official field shape; the per-key encoder omits
+`width`/`height` that match the layout defaults (the hoist above), and the
+request/response framing changes.
 
 ## 7. RPC API (proto — adjust field numbers to satisfy nanopb)
 
@@ -339,6 +375,7 @@ Request.oneof:
   GetLayerRequest{u32 layer_id}     get_edited_layer       = 6   // diff current vs default
   GetPhysicalLayoutsRequest         get_physical_layouts   = 7   // slim summary (+ optional geometry)
   GetPhysicalLayoutRequest          get_physical_layout    = 8   // one layout's geometry
+  GetLayersRequest{repeated ids}    get_layers             = 9   // batch current/effective (cold load)
 
 Response.oneof:
   ErrorResponse{ErrorCode code}     error                  = 1
@@ -350,6 +387,7 @@ Response.oneof:
   EditedLayer                       get_edited_layer       = 7
   PhysicalLayoutsResponse           get_physical_layouts   = 8
   PhysicalLayoutResponse            get_physical_layout    = 9
+  GetLayersResponse{repeated Layer} get_layers             = 10
 
 Snapshot:
   u32 definition_version, behaviors_fp, default_keymap_fp, keymap_fp,
@@ -362,6 +400,8 @@ LayerFingerprint:
 enum BehaviorDetailsMode: NONE = 0; CUSTOM = 1; ALL = 2   // §5
 ListBehaviorsRequest:
   BehaviorDetailsMode details
+  bool include_alias                          // opt-in: alias in details (§5)
+  bool exclude_display_name                   // opt-out: drop display_name (§5)
 ListBehaviorsResponse:
   repeated BehaviorSummary behaviors          // callback-encoded
 BehaviorSummary:                              // slim: normally just local_id + def_fp
@@ -370,6 +410,7 @@ BehaviorSummary:                              // slim: normally just local_id + 
 // batch miss-repair (§5)
 GetBehaviorsRequest:
   repeated u32 behavior_ids                   // .options max_count:32 (fits RX buf)
+  bool include_alias; bool exclude_display_name        // same field selection (§5)
 GetBehaviorsResponse:
   repeated BehaviorEntry behaviors            // callback-encoded
 BehaviorEntry:
@@ -388,6 +429,10 @@ BehaviorBinding:  sint32 behavior_id; uint32 param1; uint32 param2   // official
 Layer:            u32 id; string name; repeated BehaviorBinding bindings
 EditedBinding:    u32 position; BehaviorBinding binding
 EditedLayer:      u32 id; repeated EditedBinding bindings
+
+// batch effective/current layers in one round-trip (cold load)
+GetLayersRequest:  repeated u32 layer_ids       // .options max_count:32 (fits RX buf)
+GetLayersResponse: repeated Layer layers        // callback-encoded; unknown ids skipped
 
 // physical layouts: slim summary + on-demand geometry (§6)
 enum LayoutDetailsMode: NONE = 0; ALL = 1
@@ -410,6 +455,18 @@ specific `ErrorCode`. `get_edited_layer`/`get_default_layer` and the
 `CONFIG_ZMK_KEYMAP_SETTINGS_STORAGE` is off (default == current; see §2).
 `get_physical_layout` with an out-of-range `layout_index` → `ErrorResponse
 ERR_INVALID_LAYOUT`.
+
+**`get_layers` (batch, cold-load latency).** Initial load is dominated by
+per-RPC round-trip latency over BLE, not bytes, and one `get_layer` per layer
+is *more* round-trips than the whole keymap needs (the official `getKeymap`
+returns every layer in one call). So the web fetches all the layers it can't
+serve from cache in a **single** `get_layers { layer_ids }` → `repeated Layer`
+call, cutting an N-layer cold load from `N+…` round-trips to a handful. Unknown
+ids are skipped (like `get_behaviors`). The per-layer `get_layer` /
+`get_default_layer` + `get_edited_layer` diff path is kept for *warm*
+incremental updates (reuse a cached default, fetch only the small edited diff);
+`get_layers` returns effective bindings directly, which is the cheaper choice
+when there's no cached default to diff against.
 
 ## 8. Config / buffers
 
@@ -438,7 +495,7 @@ ERR_INVALID_LAYOUT`.
   is needed. Leave it at the ZMK default unless throughput profiling says
   otherwise; a modest bump (e.g. 256) means fewer transport flushes. Document
   it as a throughput knob, not a correctness limit.
-- `FK_DEFINITION_VERSION` C macro = **1**, mirrored as a TS constant in the
+- `FK_DEFINITION_VERSION` C macro = **2**, mirrored as a TS constant in the
   web bundle.
 
 ## 9. Phase plan (delegate B/C/D to Sonnet; verify between phases)

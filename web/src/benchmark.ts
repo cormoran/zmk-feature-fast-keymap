@@ -83,6 +83,12 @@ export interface RunBenchmarkOptions {
    * outer `zmk.studio.Response` envelope for the byte count; defaults to 0
    * (its almost-always value, and a zero index is omitted on the wire). */
   subsystemIndex?: number;
+  /** Fast-keymap field-selection options the benchmark loads WITH, so the UI
+   * can compare payload sizes with/without a behavior's alias / display_name
+   * (see `LoadFastKeymapOptions`). Both default to `true`, matching a normal
+   * `loadFastKeymap()` call. */
+  includeAliases?: boolean;
+  includeDisplayNames?: boolean;
 }
 
 function errorMessage(err: unknown): string {
@@ -167,7 +173,8 @@ async function measureFastKeymap(
   call: FastKeymapCall,
   storage: Storage,
   deviceKey: string,
-  subsystemIndex: number
+  subsystemIndex: number,
+  loadOptions: { includeAliases: boolean; includeDisplayNames: boolean }
 ): Promise<BenchmarkMeasurement> {
   let rpcCalls = 0;
   let readBytes = 0;
@@ -202,7 +209,12 @@ async function measureFastKeymap(
 
   const start = performance.now();
   try {
-    await loadFastKeymap(countingCall, { deviceKey, storage });
+    await loadFastKeymap(countingCall, {
+      deviceKey,
+      storage,
+      includeAliases: loadOptions.includeAliases,
+      includeDisplayNames: loadOptions.includeDisplayNames,
+    });
     return {
       ms: performance.now() - start,
       rpcCalls,
@@ -279,19 +291,25 @@ export async function runBenchmark(
 ): Promise<BenchmarkResult> {
   const deviceKey = options.deviceKey ?? "benchmark-device";
   const subsystemIndex = options.subsystemIndex ?? 0;
+  const loadOptions = {
+    includeAliases: options.includeAliases ?? true,
+    includeDisplayNames: options.includeDisplayNames ?? true,
+  };
   const storage = new MemoryStorage();
 
   const fastInitial = await measureFastKeymap(
     fastKeymapCall,
     storage,
     deviceKey,
-    subsystemIndex
+    subsystemIndex,
+    loadOptions
   );
   const fastSecond = await measureFastKeymap(
     fastKeymapCall,
     storage,
     deviceKey,
-    subsystemIndex
+    subsystemIndex,
+    loadOptions
   );
 
   const officialInitial = await measureOfficial(connection);

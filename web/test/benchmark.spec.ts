@@ -59,6 +59,7 @@ const SNAPSHOT: Snapshot = {
   maxLayerNameLength: 8,
   availableLayers: 1,
   activeLayoutIndex: 0,
+  defFpBits: 32, // fixture uses full defFp() values (identity mask)
   layers: [
     {
       id: 0,
@@ -104,11 +105,31 @@ function buildFastKeymapResponse(request: Request): Response {
       },
     };
   }
+  if (request.getLayers) {
+    // Cold load batches every layer's effective bindings in one call (SS7).
+    return {
+      getLayers: {
+        layers: request.getLayers.layerIds.map((id) => ({
+          id,
+          name: "Base",
+          bindings: [{ behaviorId: 1, param1: 4, param2: 0 }],
+        })),
+      },
+    };
+  }
   if (request.getPhysicalLayouts) {
     return {
       getPhysicalLayouts: {
         activeLayoutIndex: 0,
-        layouts: [{ name: "Default", fp: 20, keys: [] }],
+        layouts: [
+          {
+            name: "Default",
+            fp: 20,
+            keys: [],
+            defaultWidth: 0,
+            defaultHeight: 0,
+          },
+        ],
       },
     };
   }
@@ -116,7 +137,13 @@ function buildFastKeymapResponse(request: Request): Response {
     return {
       getPhysicalLayout: {
         index: request.getPhysicalLayout.layoutIndex,
-        layout: { name: "Default", fp: 20, keys: [] },
+        layout: {
+          name: "Default",
+          fp: 20,
+          keys: [],
+          defaultWidth: 0,
+          defaultHeight: 0,
+        },
       },
     };
   }
@@ -301,5 +328,25 @@ describe("runBenchmark", () => {
     expect(result.fastKeymap.second.rpcCalls).toBeLessThan(
       result.fastKeymap.initial.rpcCalls
     );
+  });
+
+  it("forwards the field-selection options to the fast-keymap load requests", async () => {
+    mockOfficialSuccess();
+    const connection = createMockConnection();
+    const requests: Request[] = [];
+    const recordingCall: FastKeymapCall = async (request) => {
+      requests.push(request);
+      return buildFastKeymapResponse(request);
+    };
+
+    await runBenchmark(recordingCall, connection, {
+      deviceKey: "field-selection",
+      includeAliases: false,
+      includeDisplayNames: false,
+    });
+
+    const listReq = requests.find((r) => r.listBehaviors)?.listBehaviors;
+    expect(listReq?.includeAlias).toBe(false);
+    expect(listReq?.excludeDisplayName).toBe(true);
   });
 });

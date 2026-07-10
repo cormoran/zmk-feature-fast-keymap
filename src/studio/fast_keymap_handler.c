@@ -135,6 +135,7 @@ static int handle_get_snapshot(cormoran_fast_keymap_Response *resp) {
 
     snap->definition_version = FK_DEFINITION_VERSION;
     snap->behaviors_fp = fk_fp_behaviors();
+    snap->def_fp_bits = fk_def_fp_bits();
     snap->default_keymap_fp = fk_fp_default_keymap();
     snap->keymap_fp = fk_fp_keymap();
     snap->physical_layout_fp = fk_fp_physical_layout();
@@ -313,7 +314,8 @@ static bool encode_metadata_sets(pb_ostream_t *stream, const pb_field_t *field, 
  * function returns) via details->metadata.arg. */
 static void fill_behavior_details(cormoran_fast_keymap_BehaviorDetails *details,
                                   const struct device *dev,
-                                  struct fk_metadata_encode_state *state) {
+                                  struct fk_metadata_encode_state *state, bool include_alias,
+                                  bool exclude_display_name) {
     struct behavior_parameter_metadata desc = {0};
     int ret = behavior_get_parameter_metadata(dev, &desc);
     if (ret < 0) {
@@ -326,10 +328,19 @@ static void fill_behavior_details(cormoran_fast_keymap_BehaviorDetails *details,
     state->i = 0;
 
     *details = (cormoran_fast_keymap_BehaviorDetails)cormoran_fast_keymap_BehaviorDetails_init_zero;
-    details->display_name.funcs.encode = encode_behavior_display_name;
-    details->display_name.arg = (void *)dev;
-    details->alias.funcs.encode = encode_behavior_alias;
-    details->alias.arg = (void *)dev;
+    /* alias is opt-in and display_name opt-out (ListBehaviorsRequest/
+     * GetBehaviorsRequest.include_alias / exclude_display_name): leaving a
+     * callback unset omits that field on the wire. def_fp still hashes the
+     * true alias + display_name regardless -- this only affects the BYTES, not
+     * the fingerprint. */
+    if (!exclude_display_name) {
+        details->display_name.funcs.encode = encode_behavior_display_name;
+        details->display_name.arg = (void *)dev;
+    }
+    if (include_alias) {
+        details->alias.funcs.encode = encode_behavior_alias;
+        details->alias.arg = (void *)dev;
+    }
     details->metadata.funcs.encode = encode_metadata_sets;
     details->metadata.arg = state;
 }
@@ -341,6 +352,8 @@ static void fill_behavior_details(cormoran_fast_keymap_BehaviorDetails *details,
  * size-pass/encode-pass), so it cannot read from a stack-local mode
  * variable. */
 static cormoran_fast_keymap_BehaviorDetailsMode fk_list_behaviors_mode;
+static bool fk_list_behaviors_include_alias;
+static bool fk_list_behaviors_exclude_display_name;
 
 static bool encode_behavior_summaries(pb_ostream_t *stream, const pb_field_t *field,
                                       void *const *arg) {
@@ -365,7 +378,9 @@ static bool encode_behavior_summaries(pb_ostream_t *stream, const pb_field_t *fi
              !fk_behavior_is_standard(beh->device));
         if (want_details) {
             sum.has_details = true;
-            fill_behavior_details(&sum.details, beh->device, &fk_metadata_state);
+            fill_behavior_details(&sum.details, beh->device, &fk_metadata_state,
+                                  fk_list_behaviors_include_alias,
+                                  fk_list_behaviors_exclude_display_name);
         }
 
         if (!pb_encode_submessage(stream, &cormoran_fast_keymap_BehaviorSummary_msg, &sum)) {
@@ -376,9 +391,11 @@ static bool encode_behavior_summaries(pb_ostream_t *stream, const pb_field_t *fi
     return true;
 }
 
-static int handle_list_behaviors(cormoran_fast_keymap_BehaviorDetailsMode mode,
+static int handle_list_behaviors(const cormoran_fast_keymap_ListBehaviorsRequest *req,
                                  cormoran_fast_keymap_Response *resp) {
-    fk_list_behaviors_mode = mode;
+    fk_list_behaviors_mode = req->details;
+    fk_list_behaviors_include_alias = req->include_alias;
+    fk_list_behaviors_exclude_display_name = req->exclude_display_name;
 
     cormoran_fast_keymap_ListBehaviorsResponse *out = &resp->response_type.list_behaviors;
     *out = (cormoran_fast_keymap_ListBehaviorsResponse)
@@ -424,7 +441,8 @@ static bool encode_behavior_entries(pb_ostream_t *stream, const pb_field_t *fiel
         cormoran_fast_keymap_BehaviorEntry entry = cormoran_fast_keymap_BehaviorEntry_init_zero;
         entry.id = id;
         entry.has_details = true;
-        fill_behavior_details(&entry.details, dev, &fk_metadata_state);
+        fill_behavior_details(&entry.details, dev, &fk_metadata_state, req->include_alias,
+                              req->exclude_display_name);
 
         if (!pb_encode_submessage(stream, &cormoran_fast_keymap_BehaviorEntry_msg, &entry)) {
             return false;
@@ -592,6 +610,69 @@ static int handle_get_edited_layer(uint32_t layer_id, cormoran_fast_keymap_Respo
     return 0;
 }
 
+/* -- get_layers (batch current/effective, DESIGN.md SS7) --------------- */
+
+/* Copied out of the request into static storage before returning, same
+ * reason as fk_get_behaviors_req: encode_layers() runs after
+ * handle_get_layers() returns (SS3's size-pass/encode-pass). */
+static cormoran_fast_keymap_GetLayersRequest fk_get_layers_req;
+
+/* One persistent fk_layer_encode_arg per requested layer, so each Layer
+ * submessage's bindings callback reads the right layer_id across both encode
+ * passes (nanopb keeps the arg pointer, like fk_snapshot_layers). */
+static struct fk_layer_encode_arg fk_get_layers_args[ARRAY_SIZE(fk_get_layers_req.layer_ids)];
+
+static bool encode_layers(pb_ostream_t *stream, const pb_field_t *field, void *const *arg) {
+    const cormoran_fast_keymap_GetLayersRequest *req =
+        (const cormoran_fast_keymap_GetLayersRequest *)*arg;
+
+    for (pb_size_t i = 0; i < req->layer_ids_count; i++) {
+        uint32_t layer_id = req->layer_ids[i];
+        if (!layer_id_valid(layer_id)) {
+            /* Skip unknown/invalid ids rather than failing the whole batch,
+             * same as get_behaviors. */
+            LOG_WRN("get_layers: invalid layer_id %u, skipping", (unsigned int)layer_id);
+            continue;
+        }
+
+        if (!pb_encode_tag_for_field(stream, field)) {
+            return false;
+        }
+
+        fk_get_layers_args[i].layer_id = (zmk_keymap_layer_id_t)layer_id;
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER)
+        fk_get_layers_args[i].use_default = false; /* effective/current bindings */
+#endif
+
+        cormoran_fast_keymap_Layer lyr = cormoran_fast_keymap_Layer_init_zero;
+        lyr.id = layer_id;
+        lyr.name.funcs.encode = encode_layer_name;
+        lyr.name.arg = &fk_get_layers_args[i].layer_id;
+        lyr.bindings.funcs.encode = encode_layer_bindings;
+        lyr.bindings.arg = &fk_get_layers_args[i];
+
+        if (!pb_encode_submessage(stream, &cormoran_fast_keymap_Layer_msg, &lyr)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static int handle_get_layers(const cormoran_fast_keymap_GetLayersRequest *req,
+                             cormoran_fast_keymap_Response *resp) {
+    fk_get_layers_req = *req;
+
+    cormoran_fast_keymap_GetLayersResponse *out = &resp->response_type.get_layers;
+    *out =
+        (cormoran_fast_keymap_GetLayersResponse)cormoran_fast_keymap_GetLayersResponse_init_zero;
+    out->layers.funcs.encode = encode_layers;
+    out->layers.arg = &fk_get_layers_req;
+
+    resp->which_response_type = cormoran_fast_keymap_Response_get_layers_tag;
+    return 0;
+}
+
 /* -- get_physical_layouts ------------------------------------------- */
 
 static bool encode_layout_name(pb_ostream_t *stream, const pb_field_t *field, void *const *arg) {
@@ -608,8 +689,25 @@ static bool encode_layout_name(pb_ostream_t *stream, const pb_field_t *field, vo
     return pb_encode_string(stream, layout->display_name, strlen(layout->display_name));
 }
 
+/* The width/height shared by most keys (see PhysicalLayoutSummary.default_*
+ * in the proto): the first key's size, which is the common case on any
+ * uniform board. Keys matching it encode width/height as 0 (omitted) and the
+ * client fills them back in from these defaults. */
+static void fk_layout_default_size(const struct zmk_physical_layout *l, int32_t *dw, int32_t *dh) {
+    if (l->keys_len > 0) {
+        *dw = l->keys[0].width;
+        *dh = l->keys[0].height;
+    } else {
+        *dw = 0;
+        *dh = 0;
+    }
+}
+
 static bool encode_layout_keys(pb_ostream_t *stream, const pb_field_t *field, void *const *arg) {
     const struct zmk_physical_layout *layout = (const struct zmk_physical_layout *)*arg;
+
+    int32_t dw, dh;
+    fk_layout_default_size(layout, &dw, &dh);
 
     for (size_t kp = 0; kp < layout->keys_len; kp++) {
         const struct zmk_key_physical_attrs *k = &layout->keys[kp];
@@ -618,9 +716,11 @@ static bool encode_layout_keys(pb_ostream_t *stream, const pb_field_t *field, vo
             return false;
         }
 
+        /* Omit width/height (encode 0) when they match the layout default;
+         * the client restores them from PhysicalLayoutSummary.default_*. */
         cormoran_fast_keymap_KeyPhysicalAttrs msg = {
-            .width = k->width,
-            .height = k->height,
+            .width = k->width == dw ? 0 : k->width,
+            .height = k->height == dh ? 0 : k->height,
             .x = k->x,
             .y = k->y,
 #if IS_ENABLED(CONFIG_ZMK_PHYSICAL_LAYOUT_KEY_ROTATION)
@@ -666,10 +766,12 @@ static bool encode_physical_layout_summaries(pb_ostream_t *stream, const pb_fiel
         summary.fp = fk_fp_physical_layout_one(l);
 
         /* DESIGN.md SS6: NONE -> summary only (name + fp, keys omitted for
-         * free by proto3); ALL -> inline every layout's geometry. */
+         * free by proto3); ALL -> inline every layout's geometry (plus the
+         * default_width/height the per-key omission relies on). */
         if (mode == cormoran_fast_keymap_LayoutDetailsMode_LAYOUT_DETAILS_ALL) {
             summary.keys.funcs.encode = encode_layout_keys;
             summary.keys.arg = (void *)l;
+            fk_layout_default_size(l, &summary.default_width, &summary.default_height);
         }
 
         if (!pb_encode_submessage(stream, &cormoran_fast_keymap_PhysicalLayoutSummary_msg,
@@ -726,6 +828,8 @@ static int handle_get_physical_layout(uint32_t layout_index, cormoran_fast_keyma
     out->layout.fp = fk_fp_physical_layout_one(fk_selected_physical_layout);
     out->layout.keys.funcs.encode = encode_layout_keys;
     out->layout.keys.arg = (void *)fk_selected_physical_layout;
+    fk_layout_default_size(fk_selected_physical_layout, &out->layout.default_width,
+                           &out->layout.default_height);
 
     resp->which_response_type = cormoran_fast_keymap_Response_get_physical_layout_tag;
     return 0;
@@ -754,7 +858,7 @@ static bool fast_keymap_rpc_handle_request(const zmk_custom_CallRequest *raw_req
         rc = handle_get_snapshot(resp);
         break;
     case cormoran_fast_keymap_Request_list_behaviors_tag:
-        rc = handle_list_behaviors(req.request_type.list_behaviors.details, resp);
+        rc = handle_list_behaviors(&req.request_type.list_behaviors, resp);
         break;
     case cormoran_fast_keymap_Request_get_behaviors_tag:
         rc = handle_get_behaviors(&req.request_type.get_behaviors, resp);
@@ -767,6 +871,9 @@ static bool fast_keymap_rpc_handle_request(const zmk_custom_CallRequest *raw_req
         break;
     case cormoran_fast_keymap_Request_get_edited_layer_tag:
         rc = handle_get_edited_layer(req.request_type.get_edited_layer.layer_id, resp);
+        break;
+    case cormoran_fast_keymap_Request_get_layers_tag:
+        rc = handle_get_layers(&req.request_type.get_layers, resp);
         break;
     case cormoran_fast_keymap_Request_get_physical_layouts_tag:
         rc = handle_get_physical_layouts(req.request_type.get_physical_layouts.details, resp);

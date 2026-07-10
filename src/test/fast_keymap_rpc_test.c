@@ -239,6 +239,38 @@ static bool decode_binding_cb(pb_istream_t *stream, const pb_field_t *field, voi
     return true;
 }
 
+/* One entry per Layer in a GetLayersResponse: its id plus its decoded
+ * bindings (each Layer submessage decoded with decode_binding_cb into its own
+ * capture). */
+struct layers_entry {
+    uint32_t id;
+    binding_capture_t bindings;
+};
+typedef CAPTURE_ARRAY(struct layers_entry, ZMK_KEYMAP_LAYERS_LEN) layers_capture_t;
+
+static bool decode_layers_cb(pb_istream_t *stream, const pb_field_t *field, void **arg) {
+    ARG_UNUSED(field);
+    layers_capture_t *cap = *arg;
+    if (cap->count >= ARRAY_SIZE(cap->entries)) {
+        LOG_ERR("too many layers in get_layers response for test capture");
+        return false;
+    }
+
+    struct layers_entry *e = &cap->entries[cap->count];
+    e->bindings = (binding_capture_t){0};
+
+    cormoran_fast_keymap_Layer lyr = cormoran_fast_keymap_Layer_init_zero;
+    lyr.bindings.funcs.decode = decode_binding_cb;
+    lyr.bindings.arg = &e->bindings;
+    if (!pb_decode(stream, cormoran_fast_keymap_Layer_fields, &lyr)) {
+        return false;
+    }
+
+    e->id = lyr.id;
+    cap->count++;
+    return true;
+}
+
 struct edited_entry {
     uint32_t position;
     cormoran_fast_keymap_BehaviorBinding binding;
@@ -396,6 +428,29 @@ static uint32_t test_crc_str8(uint32_t seed, const char *s) {
     return seed;
 }
 
+/* The width the device serves def_fp at (Snapshot.def_fp_bits /
+ * fk_def_fp_bits()); recompute_def_fp() masks its full result to this so it
+ * matches BehaviorSummary.def_fp exactly. Refreshed by
+ * sync_served_def_fp_bits() before each test that recomputes. */
+static uint8_t g_served_def_fp_bits = 16;
+
+static uint32_t mask_to_bits(uint32_t v, uint8_t bits) {
+    return bits >= 32 ? v : (v & ((1u << bits) - 1u));
+}
+
+static void sync_served_def_fp_bits(void) {
+    cormoran_fast_keymap_Request req = cormoran_fast_keymap_Request_init_zero;
+    req.which_request_type = cormoran_fast_keymap_Request_get_snapshot_tag;
+    req.request_type.get_snapshot = true;
+
+    cormoran_fast_keymap_Response resp = cormoran_fast_keymap_Response_init_zero;
+    if (call_fast_keymap_rpc(&req, &resp) &&
+        resp.which_response_type == cormoran_fast_keymap_Response_snapshot_tag) {
+        uint32_t bits = resp.response_type.snapshot.def_fp_bits;
+        g_served_def_fp_bits = bits ? (uint8_t)bits : 16;
+    }
+}
+
 static uint32_t recompute_def_fp(const char *alias, const char *display_name,
                                  const param_set_capture_t *metadata) {
     uint32_t seed = 0;
@@ -420,7 +475,10 @@ static uint32_t recompute_def_fp(const char *alias, const char *display_name,
 
     seed = test_crc_str16(seed, alias);
     seed = test_crc_str16(seed, display_name);
-    return seed;
+    /* def_fp is served truncated to the device-adaptive width
+     * (fk_def_fp_bits() / Snapshot.def_fp_bits); mirror that here so this
+     * stand-in for the web recompute matches BehaviorSummary.def_fp. */
+    return mask_to_bits(seed, g_served_def_fp_bits);
 }
 
 struct behavior_summary_entry {
@@ -707,6 +765,80 @@ static int test_get_layer_matches_live_keymap(void) {
     return 0;
 }
 
+/* get_layers batches several layers' effective bindings in one response
+ * (DESIGN.md SS7): request layers 0 and 1 plus an invalid id, and assert the
+ * batch returns exactly the two valid layers (invalid skipped) with bindings
+ * identical to the live keymap -- the same property test_get_layer_matches_
+ * live_keymap() checks per single-layer call. */
+static int test_get_layers_batch(void) {
+    cormoran_fast_keymap_Request req = cormoran_fast_keymap_Request_init_zero;
+    req.which_request_type = cormoran_fast_keymap_Request_get_layers_tag;
+    req.request_type.get_layers =
+        (cormoran_fast_keymap_GetLayersRequest)cormoran_fast_keymap_GetLayersRequest_init_zero;
+    req.request_type.get_layers.layer_ids_count = 3;
+    req.request_type.get_layers.layer_ids[0] = 0;
+    req.request_type.get_layers.layer_ids[1] = 1;
+    req.request_type.get_layers.layer_ids[2] = 250; /* invalid -> skipped */
+
+    static layers_capture_t cap;
+    cap = (layers_capture_t){0};
+
+    cormoran_fast_keymap_Response resp = cormoran_fast_keymap_Response_init_zero;
+    resp.which_response_type = cormoran_fast_keymap_Response_get_layers_tag;
+    resp.response_type.get_layers =
+        (cormoran_fast_keymap_GetLayersResponse)cormoran_fast_keymap_GetLayersResponse_init_zero;
+    resp.response_type.get_layers.layers.funcs.decode = decode_layers_cb;
+    resp.response_type.get_layers.layers.arg = &cap;
+
+    if (!call_fast_keymap_rpc(&req, &resp)) {
+        return -EINVAL;
+    }
+    if (resp.which_response_type != cormoran_fast_keymap_Response_get_layers_tag) {
+        LOG_ERR("get_layers unexpected response type %d", resp.which_response_type);
+        return -EINVAL;
+    }
+    if (cap.count != 2) {
+        LOG_ERR("get_layers returned %u layers, expected 2 (invalid id skipped)",
+                (unsigned int)cap.count);
+        return -EINVAL;
+    }
+
+    for (size_t i = 0; i < cap.count; i++) {
+        const struct layers_entry *e = &cap.entries[i];
+        if (e->id != 0 && e->id != 1) {
+            LOG_ERR("get_layers returned unexpected layer id %u", e->id);
+            return -EINVAL;
+        }
+        if (e->bindings.count != ZMK_KEYMAP_LEN) {
+            LOG_ERR("get_layers layer %u returned %u bindings, expected %d", e->id,
+                    (unsigned int)e->bindings.count, ZMK_KEYMAP_LEN);
+            return -EINVAL;
+        }
+
+        for (uint16_t b = 0; b < ZMK_KEYMAP_LEN; b++) {
+            const struct zmk_behavior_binding *live =
+                zmk_keymap_get_layer_binding_at_idx(e->id, b);
+            int32_t want_id = -1;
+            uint32_t want_p1 = 0, want_p2 = 0;
+            if (live && live->behavior_dev) {
+                want_id = zmk_behavior_get_local_id(live->behavior_dev);
+                want_p1 = live->param1;
+                want_p2 = live->param2;
+            }
+
+            const cormoran_fast_keymap_BehaviorBinding *got = &e->bindings.entries[b];
+            if (got->behavior_id != want_id || got->param1 != want_p1 || got->param2 != want_p2) {
+                LOG_ERR("get_layers layer %u binding %d mismatch: got id=%d p1=%u p2=%u", e->id, b,
+                        got->behavior_id, got->param1, got->param2);
+                return -EINVAL;
+            }
+        }
+    }
+
+    LOG_INF("PASS: fast_keymap_get_layers_batch");
+    return 0;
+}
+
 static bool call_list_behaviors(cormoran_fast_keymap_BehaviorDetailsMode mode,
                                 behavior_summary_capture_t *captured) {
     cormoran_fast_keymap_Request req = cormoran_fast_keymap_Request_init_zero;
@@ -714,6 +846,10 @@ static bool call_list_behaviors(cormoran_fast_keymap_BehaviorDetailsMode mode,
     req.request_type.list_behaviors = (cormoran_fast_keymap_ListBehaviorsRequest)
         cormoran_fast_keymap_ListBehaviorsRequest_init_zero;
     req.request_type.list_behaviors.details = mode;
+    /* Ask for the alias too (opt-in) so the def_fp encoder-consistency checks
+     * that recompute from the served alias have it; display_name is on by
+     * default. The dedicated field-selection test covers omitting them. */
+    req.request_type.list_behaviors.include_alias = true;
 
     cormoran_fast_keymap_Response resp = cormoran_fast_keymap_Response_init_zero;
     resp.which_response_type = cormoran_fast_keymap_Response_list_behaviors_tag;
@@ -733,6 +869,110 @@ static bool call_list_behaviors(cormoran_fast_keymap_BehaviorDetailsMode mode,
     return true;
 }
 
+/* Like call_list_behaviors but with explicit include_alias / exclude_display_name
+ * flags, for the field-selection test. */
+static bool issue_list_behaviors(cormoran_fast_keymap_BehaviorDetailsMode mode, bool include_alias,
+                                 bool exclude_display_name,
+                                 behavior_summary_capture_t *captured) {
+    cormoran_fast_keymap_Request req = cormoran_fast_keymap_Request_init_zero;
+    req.which_request_type = cormoran_fast_keymap_Request_list_behaviors_tag;
+    req.request_type.list_behaviors = (cormoran_fast_keymap_ListBehaviorsRequest)
+        cormoran_fast_keymap_ListBehaviorsRequest_init_zero;
+    req.request_type.list_behaviors.details = mode;
+    req.request_type.list_behaviors.include_alias = include_alias;
+    req.request_type.list_behaviors.exclude_display_name = exclude_display_name;
+
+    cormoran_fast_keymap_Response resp = cormoran_fast_keymap_Response_init_zero;
+    resp.which_response_type = cormoran_fast_keymap_Response_list_behaviors_tag;
+    resp.response_type.list_behaviors = (cormoran_fast_keymap_ListBehaviorsResponse)
+        cormoran_fast_keymap_ListBehaviorsResponse_init_zero;
+    resp.response_type.list_behaviors.behaviors.funcs.decode = decode_behavior_summary_cb;
+    resp.response_type.list_behaviors.behaviors.arg = captured;
+
+    if (!call_fast_keymap_rpc(&req, &resp)) {
+        return false;
+    }
+    return resp.which_response_type == cormoran_fast_keymap_Response_list_behaviors_tag;
+}
+
+static const struct behavior_summary_entry *
+find_summary_by_local_id(const behavior_summary_capture_t *cap, uint32_t local_id) {
+    for (size_t i = 0; i < cap->count; i++) {
+        if (cap->entries[i].local_id == local_id) {
+            return &cap->entries[i];
+        }
+    }
+    return NULL;
+}
+
+/* alias is opt-in and display_name opt-out (ListBehaviorsRequest.include_alias
+ * / exclude_display_name): assert each flag actually controls whether that
+ * field rides the wire, and that def_fp is unaffected (it hashes the true
+ * alias/display_name regardless of what's served). */
+static int test_list_behaviors_field_selection(void) {
+    static behavior_summary_capture_t no_alias;
+    static behavior_summary_capture_t no_name;
+    no_alias = (behavior_summary_capture_t){0};
+    no_name = (behavior_summary_capture_t){0};
+
+    /* ALL mode so every summary carries inline details. */
+    if (!issue_list_behaviors(cormoran_fast_keymap_BehaviorDetailsMode_BEHAVIOR_DETAILS_ALL,
+                              /*include_alias=*/false, /*exclude_display_name=*/false, &no_alias) ||
+        !issue_list_behaviors(cormoran_fast_keymap_BehaviorDetailsMode_BEHAVIOR_DETAILS_ALL,
+                              /*include_alias=*/true, /*exclude_display_name=*/true, &no_name)) {
+        return -EINVAL;
+    }
+    if (no_alias.count == 0 || no_alias.count != no_name.count) {
+        LOG_ERR("field-selection list_behaviors counts differ (%u vs %u)",
+                (unsigned int)no_alias.count, (unsigned int)no_name.count);
+        return -EINVAL;
+    }
+
+    for (size_t i = 0; i < no_alias.count; i++) {
+        const struct behavior_summary_entry *a = &no_alias.entries[i];
+        if (!a->has_details) {
+            LOG_ERR("ALL mode did not inline details for local_id %u", a->local_id);
+            return -EINVAL;
+        }
+        /* include_alias=false -> alias omitted; display_name still present. */
+        if (a->alias[0] != '\0') {
+            LOG_ERR("include_alias=false but local_id %u served alias '%s'", a->local_id, a->alias);
+            return -EINVAL;
+        }
+        if (a->display_name[0] == '\0') {
+            LOG_ERR("exclude_display_name=false but local_id %u served no display_name",
+                    a->local_id);
+            return -EINVAL;
+        }
+
+        /* exclude_display_name=true -> display_name omitted; alias present. */
+        const struct behavior_summary_entry *b = find_summary_by_local_id(&no_name, a->local_id);
+        if (!b) {
+            LOG_ERR("local_id %u missing from the second (no-display-name) list", a->local_id);
+            return -EINVAL;
+        }
+        if (b->alias[0] == '\0') {
+            LOG_ERR("include_alias=true but local_id %u served no alias", b->local_id);
+            return -EINVAL;
+        }
+        if (b->display_name[0] != '\0') {
+            LOG_ERR("exclude_display_name=true but local_id %u served display_name '%s'",
+                    b->local_id, b->display_name);
+            return -EINVAL;
+        }
+
+        /* Field selection must not change the fingerprint. */
+        if (a->def_fp != b->def_fp) {
+            LOG_ERR("def_fp for local_id %u changed with field selection (%u vs %u)", a->local_id,
+                    a->def_fp, b->def_fp);
+            return -EINVAL;
+        }
+    }
+
+    LOG_INF("PASS: fast_keymap_list_behaviors_field_selection");
+    return 0;
+}
+
 /* Covers DESIGN.md SS5's three BehaviorDetailsMode semantics, def_fp
  * determinism, and the encoder-consistency property: recompute def_fp from
  * the served alias/display_name/metadata bytes (recompute_def_fp(), a
@@ -748,6 +988,8 @@ static int test_list_behaviors_modes_and_def_fp(void) {
     none_cap = (behavior_summary_capture_t){0};
     all_cap = (behavior_summary_capture_t){0};
     custom_cap = (behavior_summary_capture_t){0};
+
+    sync_served_def_fp_bits();
 
     if (!call_list_behaviors(cormoran_fast_keymap_BehaviorDetailsMode_BEHAVIOR_DETAILS_NONE,
                              &none_cap) ||
@@ -911,6 +1153,8 @@ static int test_list_behaviors_modes_and_def_fp(void) {
  * unknown id yields no entry (this handler's chosen "skip unknown ids"
  * behavior -- the response still succeeds for the ids that do resolve). */
 static int test_get_behaviors_batch(void) {
+    sync_served_def_fp_bits();
+
     static behavior_summary_capture_t list_cap;
     list_cap = (behavior_summary_capture_t){0};
     if (!call_list_behaviors(cormoran_fast_keymap_BehaviorDetailsMode_BEHAVIOR_DETAILS_ALL,
@@ -935,6 +1179,7 @@ static int test_get_behaviors_batch(void) {
     req.request_type.get_behaviors.behavior_ids[0] = kp->local_id;
     req.request_type.get_behaviors.behavior_ids[1] = myht->local_id;
     req.request_type.get_behaviors.behavior_ids[2] = unknown_id;
+    req.request_type.get_behaviors.include_alias = true; /* recompute needs the alias */
 
     cormoran_fast_keymap_Response resp = cormoran_fast_keymap_Response_init_zero;
     static behavior_entry_capture_array_t entries_cap;
@@ -1500,7 +1745,17 @@ static int fast_keymap_rpc_test_init(void) {
         return ret;
     }
 
+    ret = test_get_layers_batch();
+    if (ret < 0) {
+        return ret;
+    }
+
     ret = test_list_behaviors_modes_and_def_fp();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_list_behaviors_field_selection();
     if (ret < 0) {
         return ret;
     }

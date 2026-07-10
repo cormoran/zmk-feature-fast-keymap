@@ -44,6 +44,15 @@ static uint32_t crc_i32le(uint32_t seed, int32_t v) { return crc_u32le(seed, (ui
 
 static uint32_t crc_i16le(uint32_t seed, int16_t v) { return crc_u16le(seed, (uint16_t)v); }
 
+/* Every fingerprint this module serves is truncated to its low 16 bits before
+ * it leaves fingerprint.c (wire, caching, and internal chaining all see the
+ * same 16-bit value), so the `uint32` fp fields on the wire encode as <=3-byte
+ * varints instead of ~5. crc32's low 16 bits are as uniformly distributed as
+ * any 16-bit hash, so this is just a narrower cache key -- see DESIGN.md SS4
+ * for the (tiny, cache-key-only) collision tradeoff this trades bytes for.
+ * Mirrored on the web by masking def_fp the same way (fingerprint.ts). */
+static uint32_t fk_fp16(uint32_t crc) { return crc & 0xFFFFu; }
+
 /* `u16 length` prefix + raw bytes, used for behavior alias/display_name and
  * layer/physical-layout names (SS4). NOT used for behavior parameter value
  * display names inside the metadata bytes (def_fp's preimage) -- SS5 freezes
@@ -249,7 +258,10 @@ static void fk_def_fp_cache_insert(const struct device *dev, uint32_t fp) {
 }
 #endif /* CONFIG_ZMK_FAST_KEYMAP_FP_CACHE */
 
-uint32_t fk_fp_behavior_def(const struct device *dev) {
+/* The FULL 32-bit def_fp (the memoized value; see the cache above). The
+ * served def_fp is this masked to fk_def_fp_bits() -- see fk_fp_behavior_def()
+ * below. */
+static uint32_t fk_fp_behavior_def_full(const struct device *dev) {
 #if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
     uint32_t cached;
     if (fk_def_fp_cache_lookup(dev, &cached)) {
@@ -264,6 +276,82 @@ uint32_t fk_fp_behavior_def(const struct device *dev) {
 #endif
 
     return fp;
+}
+
+/* -- def_fp width (fk_def_fp_bits) --
+ *
+ * Every fp is normally served 16-bit (fk_fp16) to keep the wire varints
+ * short. For def_fp that risks two DISTINCT behaviors on the SAME device
+ * colliding on their low 16 bits, which would make the web resolve one of
+ * them to the other's bundle/cache entry (wrong metadata). To avoid that
+ * without paying full 32-bit on every device, pick the smallest width (16,
+ * 24, or 32 bits) at which this device's behaviors are all distinct, serve
+ * every def_fp masked to it, and report the width in Snapshot.def_fp_bits so
+ * the web can mask its bundle/cache keys identically. Almost every board is
+ * already collision-free at 16 bits, so this only ever widens the unlucky
+ * one -- and only that device pays the extra byte(s).
+ *
+ * Two behaviors with byte-identical alias+display_name+metadata legitimately
+ * share a full def_fp; that is NOT a harmful collision (they resolve to the
+ * same, correct definition), so it never forces a wider width. Immutable once
+ * local_ids settle (def_fp depends only on compile-time metadata), so cached
+ * forever like behaviors_fp when CONFIG_ZMK_FAST_KEYMAP_FP_CACHE is on. */
+static uint32_t fk_def_fp_mask(uint8_t bits) {
+    return bits >= 32 ? 0xFFFFFFFFu : ((1u << bits) - 1u);
+}
+
+static bool fk_def_fps_unique_at(uint8_t bits) {
+    uint32_t mask = fk_def_fp_mask(bits);
+
+    STRUCT_SECTION_FOREACH(zmk_behavior_local_id_map, a) {
+        uint32_t full_a = fk_fp_behavior_def_full(a->device);
+
+        STRUCT_SECTION_FOREACH(zmk_behavior_local_id_map, b) {
+            if (b == a) {
+                break; /* only compare each unordered pair once */
+            }
+            uint32_t full_b = fk_fp_behavior_def_full(b->device);
+            /* A masked clash between two behaviors whose full def_fps differ
+             * is the harmful case; equal full def_fps are identical content
+             * and resolve correctly, so they don't force a wider width. */
+            if ((full_a & mask) == (full_b & mask) && full_a != full_b) {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
+static bool fk_def_fp_bits_valid;
+static uint8_t fk_def_fp_bits_cache;
+#endif
+
+uint8_t fk_def_fp_bits(void) {
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
+    if (fk_def_fp_bits_valid) {
+        return fk_def_fp_bits_cache;
+    }
+#endif
+
+    uint8_t bits = 16;
+    if (!fk_def_fps_unique_at(16)) {
+        bits = 24;
+        if (!fk_def_fps_unique_at(24)) {
+            bits = 32;
+        }
+    }
+
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
+    fk_def_fp_bits_cache = bits;
+    fk_def_fp_bits_valid = true;
+#endif
+    return bits;
+}
+
+uint32_t fk_fp_behavior_def(const struct device *dev) {
+    return fk_fp_behavior_def_full(dev) & fk_def_fp_mask(fk_def_fp_bits());
 }
 
 /* -- behaviors_fp cache --
@@ -335,6 +423,8 @@ uint32_t fk_fp_behaviors(void) {
 
         last_id = best_id;
     }
+
+    seed = fk_fp16(seed);
 
 #if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
     fk_behaviors_fp_cache = seed;
@@ -414,6 +504,8 @@ uint32_t fk_fp_default_keymap(void) {
         }
     }
 
+    seed = fk_fp16(seed);
+
 #if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER) && IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
     fk_default_keymap_fp_cache = seed;
     fk_default_keymap_fp_valid = true;
@@ -441,7 +533,7 @@ uint32_t fk_fp_keymap(void) {
         }
     }
 
-    return seed;
+    return fk_fp16(seed);
 }
 
 /* Per-layout physical fp preimage (DESIGN.md SS4/SS6): one layout's `str16
@@ -525,7 +617,7 @@ uint32_t fk_fp_physical_layout_one(const struct zmk_physical_layout *layout) {
     }
 #endif
 
-    uint32_t fp = crc_physical_layout_preimage(0, layout);
+    uint32_t fp = fk_fp16(crc_physical_layout_preimage(0, layout));
 
 #if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
     fk_layout_fp_cache_insert(layout, fp);
@@ -545,7 +637,7 @@ uint32_t fk_fp_physical_layout(void) {
         seed = crc_physical_layout_preimage(seed, layouts[i]);
     }
 
-    return seed;
+    return fk_fp16(seed);
 }
 
 uint32_t fk_fp_layer_current(zmk_keymap_layer_id_t layer_id) {
@@ -558,7 +650,7 @@ uint32_t fk_fp_layer_current(zmk_keymap_layer_id_t layer_id) {
         seed = fk_crc_binding(seed, binding);
     }
 
-    return seed;
+    return fk_fp16(seed);
 }
 
 uint32_t fk_fp_layer_default(zmk_keymap_layer_id_t layer_id) {
@@ -580,6 +672,8 @@ uint32_t fk_fp_layer_default(zmk_keymap_layer_id_t layer_id) {
             zmk_stock_keymap_get_layer_binding_at_idx(layer_id, b);
         seed = fk_crc_binding(seed, binding);
     }
+
+    seed = fk_fp16(seed);
 
 #if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
     if (cacheable) {

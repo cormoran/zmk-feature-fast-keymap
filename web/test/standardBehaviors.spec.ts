@@ -3,6 +3,7 @@ import {
   bundledByDefFp,
   crc32Update,
   defFp,
+  maskDefFp,
 } from "zmk-feature-fast-keymap";
 
 describe("crc32Update", () => {
@@ -79,13 +80,15 @@ describe("defFp", () => {
   // regression in the byte layout itself, not just self-consistency against
   // this file's own implementation.
   it("matches an independently computed golden vector (empty metadata)", () => {
-    // seed=0; crc(u8 num_sets=0); crc(str16 "a"); crc(str16 "b")
+    // seed=0; crc(u8 num_sets=0); crc(str16 "a"); crc(str16 "b"). defFp() is
+    // the FULL 32-bit value; the device serves it truncated to
+    // Snapshot.def_fp_bits (see maskDefFp tests below).
     expect(defFp("a", "b", [])).toBe(0x77d4f6fe);
   });
 
   it("matches an independently computed golden vector (kp-shaped metadata)", () => {
     // 1 set: param1=[HID_USAGE "Key" keyboardMax=255 consumerMax=4095], param2=[]
-    // then str16 "kp", then str16 "Key Press".
+    // then str16 "kp", then str16 "Key Press" (full 32-bit).
     expect(
       defFp("kp", "Key Press", [
         {
@@ -99,22 +102,38 @@ describe("defFp", () => {
   });
 });
 
+describe("maskDefFp", () => {
+  it("masks a full def_fp to 16/24/32-bit widths (and treats 0/absent as 16)", () => {
+    const full = 0x8f0abb1f;
+    expect(maskDefFp(full, 16)).toBe(0xbb1f);
+    expect(maskDefFp(full, 24)).toBe(0x0abb1f);
+    expect(maskDefFp(full, 32)).toBe(0x8f0abb1f);
+    expect(maskDefFp(full, 0)).toBe(0xbb1f); // 0 -> 16 (legacy firmware)
+  });
+});
+
 describe("bundledByDefFp", () => {
-  it("resolves a known standard behavior (kp) by its computed def_fp", () => {
+  it("resolves a known standard behavior (kp) at the device's served width", () => {
     const kp = STANDARD_BEHAVIORS.kp;
-    const fp = defFp(kp.alias, kp.displayName, kp.metadata);
-    expect(bundledByDefFp(fp)).toEqual(kp);
+    const full = defFp(kp.alias, kp.displayName, kp.metadata);
+    // The device serves def_fp masked to Snapshot.def_fp_bits, so the lookup
+    // key is the masked value; the bundle is masked to the same width.
+    for (const bits of [16, 24, 32]) {
+      expect(bundledByDefFp(maskDefFp(full, bits), bits)).toEqual(kp);
+    }
   });
 
   it("misses (returns undefined) for a def_fp that doesn't match any bundled behavior", () => {
-    const unknownFp = defFp("some_custom_user_behavior", "Custom", []);
-    expect(bundledByDefFp(unknownFp)).toBeUndefined();
+    const unknownFull = defFp("some_custom_user_behavior", "Custom", []);
+    expect(bundledByDefFp(maskDefFp(unknownFull, 16), 16)).toBeUndefined();
   });
 
-  it("resolves every bundled entry by its own def_fp", () => {
+  it("resolves every bundled entry by its own def_fp at each width", () => {
     for (const def of Object.values(STANDARD_BEHAVIORS)) {
-      const fp = defFp(def.alias, def.displayName, def.metadata);
-      expect(bundledByDefFp(fp)).toEqual(def);
+      const full = defFp(def.alias, def.displayName, def.metadata);
+      for (const bits of [16, 24, 32]) {
+        expect(bundledByDefFp(maskDefFp(full, bits), bits)).toEqual(def);
+      }
     }
   });
 });

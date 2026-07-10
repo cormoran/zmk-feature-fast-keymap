@@ -428,16 +428,34 @@ function BenchmarkPanel({
 }) {
   const [result, setResult] = useState<BenchmarkResult | null>(null);
   const [isRunning, setIsRunning] = useState(false);
+  // Fast-keymap field-selection options to benchmark WITH -- toggling these
+  // shows how much dropping a behavior's alias / display_name shrinks the
+  // cold-load payload (see loadFastKeymap's includeAliases/includeDisplayNames).
+  const [includeAliases, setIncludeAliases] = useState(true);
+  const [includeDisplayNames, setIncludeDisplayNames] = useState(true);
 
   const run = useCallback(async () => {
     if (!ready || !connection) return;
     setIsRunning(true);
     try {
-      setResult(await runBenchmark(call, connection, { subsystemIndex }));
+      setResult(
+        await runBenchmark(call, connection, {
+          subsystemIndex,
+          includeAliases,
+          includeDisplayNames,
+        })
+      );
     } finally {
       setIsRunning(false);
     }
-  }, [ready, connection, call, subsystemIndex]);
+  }, [
+    ready,
+    connection,
+    call,
+    subsystemIndex,
+    includeAliases,
+    includeDisplayNames,
+  ]);
 
   const speedup = result ? secondLoadSpeedup(result) : null;
   const byteSavings = result ? secondLoadByteSavings(result) : null;
@@ -454,6 +472,32 @@ function BenchmarkPanel({
         also requires ZMK Studio to be unlocked (<code>&amp;studio_unlock</code>
         ); fast-keymap does not.
       </p>
+
+      <fieldset className="benchmark-options" disabled={isRunning}>
+        <legend>fast-keymap load options</legend>
+        <label>
+          <input
+            type="checkbox"
+            checked={includeAliases}
+            onChange={(e) => setIncludeAliases(e.target.checked)}
+          />
+          Include behavior <code>alias</code>
+        </label>
+        <label>
+          <input
+            type="checkbox"
+            checked={includeDisplayNames}
+            onChange={(e) => setIncludeDisplayNames(e.target.checked)}
+          />
+          Include behavior <code>display_name</code>
+        </label>
+        <p className="hint-message">
+          These only affect the fast-keymap runs. Turning them off drops those
+          fields from a cold load's inlined behavior details, so the
+          &quot;initial&quot; read-bytes shrink; a warm 2nd load is served from
+          cache either way.
+        </p>
+      </fieldset>
 
       <button
         className="btn btn-secondary"

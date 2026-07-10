@@ -144,6 +144,10 @@ function makeSnapshot(overrides: Partial<Snapshot> = {}): Snapshot {
     maxLayerNameLength: 16,
     availableLayers: 2,
     activeLayoutIndex: 0,
+    // The fixtures below carry full 32-bit defFp() values, so the mocked
+    // device reports 32-bit width (identity mask). def_fp truncation math is
+    // covered by standardBehaviors.spec.
+    defFpBits: 32,
     layers: [
       {
         id: 0,
@@ -173,7 +177,9 @@ const SNAPSHOT = makeSnapshot();
  * ALL -> always; CUSTOM -> only non-standard; NONE -> never. */
 function summaryFor(
   fixture: BehaviorFixture,
-  mode: BehaviorDetailsMode
+  mode: BehaviorDetailsMode,
+  includeAlias: boolean,
+  excludeDisplayName: boolean
 ): BehaviorSummary {
   const shouldInline =
     mode === BehaviorDetailsMode.BEHAVIOR_DETAILS_ALL ||
@@ -184,12 +190,22 @@ function summaryFor(
     localId: fixture.localId,
     defFp: fixture.defFp,
     details: shouldInline
-      ? {
-          alias: fixture.alias,
-          displayName: fixture.displayName,
-          metadata: fixture.metadata,
-        }
+      ? detailsFor(fixture, includeAlias, excludeDisplayName)
       : undefined,
+  };
+}
+
+/** Mirrors the firmware's opt-in alias / opt-out display_name: an omitted
+ * field decodes to proto3's default `""` (SS5). */
+function detailsFor(
+  fixture: BehaviorFixture,
+  includeAlias: boolean,
+  excludeDisplayName: boolean
+): BehaviorDetails {
+  return {
+    alias: includeAlias ? fixture.alias : "",
+    displayName: excludeDisplayName ? "" : fixture.displayName,
+    metadata: fixture.metadata,
   };
 }
 
@@ -216,15 +232,23 @@ function makeDeviceCall(
       return { snapshot };
     }
     if (request.listBehaviors) {
+      const { details, includeAlias, excludeDisplayName } =
+        request.listBehaviors;
       return {
         listBehaviors: {
           behaviors: behaviors.map((b) =>
-            summaryFor(b, request.listBehaviors!.details)
+            summaryFor(
+              b,
+              details,
+              includeAlias ?? false,
+              excludeDisplayName ?? false
+            )
           ),
         },
       };
     }
     if (request.getBehaviors) {
+      const { includeAlias, excludeDisplayName } = request.getBehaviors;
       return {
         getBehaviors: {
           behaviors: request.getBehaviors.behaviorIds.flatMap((id) => {
@@ -233,11 +257,11 @@ function makeDeviceCall(
             return [
               {
                 id,
-                details: {
-                  alias: fixture.alias,
-                  displayName: fixture.displayName,
-                  metadata: fixture.metadata,
-                },
+                details: detailsFor(
+                  fixture,
+                  includeAlias ?? false,
+                  excludeDisplayName ?? false
+                ),
               },
             ];
           }),
@@ -270,6 +294,23 @@ function makeDeviceCall(
         `unexpected get_edited_layer(${request.getEditedLayer.layerId})`
       );
     }
+    if (request.getLayers) {
+      // Batch effective/current bindings per requested id (SS7): layer 0 is
+      // unedited (effective == default), layer 1 is edited (effective ==
+      // default overlaid with its edits). Unknown ids are skipped.
+      const effective: Record<number, { name: string; bindings: unknown[] }> = {
+        0: { name: "Base", bindings: BASE_DEFAULT_BINDINGS },
+        1: { name: "Fn", bindings: FN_EFFECTIVE_BINDINGS },
+      };
+      return {
+        getLayers: {
+          layers: request.getLayers.layerIds.flatMap((id) => {
+            const l = effective[id];
+            return l ? [{ id, name: l.name, bindings: l.bindings }] : [];
+          }),
+        },
+      };
+    }
     if (request.getPhysicalLayouts) {
       // Mirrors the firmware: NONE mode never inlines `keys` (SS6) --
       // strip any test-fixture geometry so a bug that regresses to always
@@ -285,6 +326,8 @@ function makeDeviceCall(
             name: l.name,
             fp: l.fp,
             keys: [],
+            defaultWidth: 0,
+            defaultHeight: 0,
           })),
         },
       };
@@ -302,7 +345,13 @@ function makeDeviceCall(
       return {
         getPhysicalLayout: {
           index,
-          layout: { name: geometry.name, fp: summary.fp, keys: geometry.keys },
+          layout: {
+            name: geometry.name,
+            fp: summary.fp,
+            keys: geometry.keys,
+            defaultWidth: 0,
+            defaultHeight: 0,
+          },
         },
       };
     }
@@ -336,15 +385,14 @@ describe("loadFastKeymap", () => {
 
     // get_snapshot, list_behaviors(CUSTOM, first connect -> empty cache),
     // (kp resolves from bundle, my_custom is inlined by CUSTOM mode -- no
-    // get_behaviors needed), get_layer(0), get_default_layer(1),
-    // get_edited_layer(1), get_physical_layouts(NONE) + get_physical_layout
-    // for the active (only) layout, whose geometry isn't cached yet.
+    // get_behaviors needed), a single batched get_layers([0,1]) for both
+    // layers' effective bindings (no cached defaults to diff against),
+    // get_physical_layouts(NONE) + get_physical_layout for the active (only)
+    // layout, whose geometry isn't cached yet.
     expect(requestKinds(requests)).toEqual([
       "getSnapshot",
       "listBehaviors",
-      "getLayer",
-      "getDefaultLayer",
-      "getEditedLayer",
+      "getLayers",
       "getPhysicalLayouts",
       "getPhysicalLayout",
     ]);
@@ -376,8 +424,8 @@ describe("loadFastKeymap", () => {
       behaviorsCached: 0,
       behaviorsFetched: 1,
       layersFromCache: 0,
-      layersFetchedFull: 1,
-      layersFetchedDiff: 1,
+      layersFetchedFull: 2,
+      layersFetchedDiff: 0,
       physicalLayoutsFromCache: false,
     });
   });
@@ -475,6 +523,35 @@ describe("loadFastKeymap", () => {
     expect(custom?.alias).toBe("my_custom");
     expect(custom?.metadata).toEqual(CUSTOM_METADATA);
     expect(model.stats.behaviorsFetched).toBe(1);
+  });
+
+  it("includeAliases:false / includeDisplayNames:false omit those fields on the wire (bundle still fills standard behaviors)", async () => {
+    const { call, requests } = makeDeviceCall([KP_BEHAVIOR, CUSTOM_BEHAVIOR]);
+
+    const model = await loadFastKeymap(call, {
+      deviceKey: DEVICE_KEY,
+      includeAliases: false,
+      includeDisplayNames: false,
+    });
+
+    // The request carries the field-selection flags.
+    const listReq = requests.find((r) => r.listBehaviors)!.listBehaviors!;
+    expect(listReq.includeAlias).toBe(false);
+    expect(listReq.excludeDisplayName).toBe(true);
+
+    // Standard behavior: alias/display_name come from the bundle regardless.
+    const kp = model.behaviors.find((b) => b.localId === 1)!;
+    expect(kp.resolvedFrom).toBe("bundle");
+    expect(kp.alias).toBe("kp");
+    expect(kp.displayName).toBe("Key Press");
+
+    // Custom behavior: inlined WITHOUT alias/display_name -> both empty, but
+    // metadata (never gated) still arrives.
+    const custom = model.behaviors.find((b) => b.localId === 2)!;
+    expect(custom.resolvedFrom).toBe("device");
+    expect(custom.alias).toBe("");
+    expect(custom.displayName).toBe("");
+    expect(custom.metadata).toEqual(CUSTOM_METADATA);
   });
 
   it("a def_fp miss (neither inlined nor bundled) is resolved by exactly one get_behaviors batch", async () => {
@@ -672,6 +749,40 @@ describe("loadPhysicalLayoutGeometry", () => {
       fp: SPLIT_LAYOUT_FP,
       keys: SPLIT_LAYOUT_KEYS,
     });
+  });
+
+  it("restores width/height hoisted to default_width/default_height (SS6)", async () => {
+    // A device that hoisted the common 100x100 size: keys matching it carry
+    // width/height 0, non-matching keys carry their own (a 200-wide key).
+    const call: FastKeymapCall = async (request) => {
+      if (request.getPhysicalLayout) {
+        return {
+          getPhysicalLayout: {
+            index: 0,
+            layout: {
+              name: "Hoisted",
+              fp: 4242,
+              defaultWidth: 100,
+              defaultHeight: 100,
+              keys: [
+                { width: 0, height: 0, x: 0, y: 0, r: 0, rx: 0, ry: 0 },
+                { width: 200, height: 0, x: 100, y: 0, r: 0, rx: 0, ry: 0 },
+              ],
+            },
+          },
+        };
+      }
+      throw new Error(`unexpected request: ${JSON.stringify(request)}`);
+    };
+
+    const keys = await loadPhysicalLayoutGeometry(call, 0, {
+      deviceKey: DEVICE_KEY,
+    });
+
+    expect(keys).toEqual([
+      { width: 100, height: 100, x: 0, y: 0, r: 0, rx: 0, ry: 0 },
+      { width: 200, height: 100, x: 100, y: 0, r: 0, rx: 0, ry: 0 },
+    ]);
   });
 });
 

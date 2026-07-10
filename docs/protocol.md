@@ -15,8 +15,40 @@ it safely.
 CRC32 (IEEE 802.3 / zlib, reflected polynomial `0xEDB88320`, seed `0`,
 `~crc` in and out). Computed with `crc32_ieee_update()` on-device and a matching
 table implementation in the web app. Fingerprints are **internal hashing
-inputs** — the bytes below never go on the wire; only the resulting `uint32`
-does (inside `Snapshot`).
+inputs** — the bytes below never go on the wire; only the resulting fp does
+(inside `Snapshot` and the behavior/layout summaries).
+
+**Truncation (v2).** fps are truncated before they are served, so the `uint32`
+fp fields encode as short varints instead of ~5 bytes:
+
+- **Opaque fps** (`behaviors_fp`, `default_keymap_fp`, `keymap_fp`, per-layer
+  `fp`/`default_fp`, per-layout physical `fp`, `physical_layout_fp`) are
+  truncated to their **low 16 bits** (`fk_fp16()` in `src/fingerprint.c`).
+  These only ever gate a cache refetch, so a 16-bit collision is harmless (a
+  rare unnecessary refetch, never wrong data).
+
+- **`def_fp`** uses a **device-adaptive width** of 16, 24, or 32 bits — the
+  smallest at which *every behavior on this device* has a distinct `def_fp`
+  (`fk_def_fp_bits()`), reported in `Snapshot.def_fp_bits`. Because a `def_fp`
+  match makes the web resolve a behavior's metadata from its bundle/cache
+  *without* fetching, two distinct behaviors sharing a served `def_fp` would
+  mis-resolve one of them (a visible-but-non-fatal wrong param label, never a
+  crash). Choosing the width for on-device uniqueness makes **device-internal
+  `def_fp` collisions impossible**, and almost every board is already unique at
+  16 bits, so only the rare colliding board pays the extra byte(s). The web
+  masks its bundle/cache `def_fp` keys to `def_fp_bits` (`maskDefFp()`), and
+  refuses to resolve a masked key that two *different* bundle definitions
+  share (forcing a fetch), so a bundle-internal collision can't mis-resolve
+  either. The one residual (tiny) risk is a *custom* behavior colliding, at the
+  served width, with a bundled standard behavior that isn't installed on the
+  device — the device can't see the bundle to widen against it; at ≥16 bits
+  that is ≈ `(#bundled)/2^bits` per such behavior (≈0.04 % at 16 bits).
+
+crc32's low bits are as uniformly distributed as any hash of that width.
+Two behaviors with byte-identical alias+display_name+metadata legitimately
+share a `def_fp` (they resolve to the same, correct definition) and so never
+force a wider width. Reverting to a fixed 32-bit `def_fp` is a
+`FK_DEFINITION_VERSION` bump.
 
 Serialization primitives (little-endian):
 

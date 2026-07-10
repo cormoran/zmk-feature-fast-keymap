@@ -55,6 +55,7 @@ const SNAPSHOT: Snapshot = {
   maxLayerNameLength: 8,
   availableLayers: 1,
   activeLayoutIndex: 0,
+  defFpBits: 32, // fixture serves full defFp() values (identity mask)
   layers: [
     {
       id: 0,
@@ -100,11 +101,31 @@ function buildResponse(request: Request): Response {
       },
     };
   }
+  if (request.getLayers) {
+    // Cold load batches every layer's effective bindings in one call (SS7).
+    return {
+      getLayers: {
+        layers: request.getLayers.layerIds.map((id) => ({
+          id,
+          name: "Base",
+          bindings: [{ behaviorId: 1, param1: 4, param2: 0 }],
+        })),
+      },
+    };
+  }
   if (request.getPhysicalLayouts) {
     return {
       getPhysicalLayouts: {
         activeLayoutIndex: 0,
-        layouts: [{ name: "Default", fp: 20, keys: [] }],
+        layouts: [
+          {
+            name: "Default",
+            fp: 20,
+            keys: [],
+            defaultWidth: 0,
+            defaultHeight: 0,
+          },
+        ],
       },
     };
   }
@@ -112,7 +133,13 @@ function buildResponse(request: Request): Response {
     return {
       getPhysicalLayout: {
         index: request.getPhysicalLayout.layoutIndex,
-        layout: { name: "Default", fp: 20, keys: [] },
+        layout: {
+          name: "Default",
+          fp: 20,
+          keys: [],
+          defaultWidth: 0,
+          defaultHeight: 0,
+        },
       },
     };
   }
