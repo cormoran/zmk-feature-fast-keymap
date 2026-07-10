@@ -3,6 +3,7 @@ PASS: fast_keymap_snapshot_fingerprint_stable
 PASS: fast_keymap_get_layer_matches_live_keymap
 PASS: fast_keymap_get_layers_batch
 PASS: fast_keymap_list_behaviors_modes_and_def_fp
+PASS: fast_keymap_list_behaviors_field_selection
 PASS: fast_keymap_get_behaviors_batch
 PASS: fast_keymap_physical_layouts
 PASS: fast_keymap_invalid_requests

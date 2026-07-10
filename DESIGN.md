@@ -268,8 +268,18 @@ is `def_fp`.
 `details` is a `BehaviorDetails { display_name, alias, metadata }` where
 `metadata` is the **official** tree (`repeated BehaviorBindingParametersSet` of
 `BehaviorParameterValueDescription`, callback-encoded — copy the official
-encoder). It carries no fingerprint; the client recomputes `def_fp` from the
-served fields (guaranteeing both sides agree on the canonicalization).
+encoder). It carries no fingerprint (the client compares `BehaviorSummary.def_fp`).
+
+**Per-field selection.** Inside `details`, `metadata` is always present, but the
+two strings are opt-controlled to shave bytes when a consumer doesn't render
+them: `include_alias` (default **off** — the `&<alias>` token is only needed
+for display/export, and standard behaviors get it from the bundle) and
+`exclude_display_name` (default **off**, i.e. display_name is included — opt out
+to drop it). An omitted string is proto3's default `""`. Both are on
+`ListBehaviorsRequest` and `GetBehaviorsRequest`. `def_fp` still hashes the true
+alias + display_name regardless of what rides the wire, so field selection never
+changes a fingerprint (the web reproduces `def_fp` from its **bundle**, which
+always has both strings).
 
 `list_behaviors` takes a `BehaviorDetailsMode`:
 
@@ -390,6 +400,8 @@ LayerFingerprint:
 enum BehaviorDetailsMode: NONE = 0; CUSTOM = 1; ALL = 2   // §5
 ListBehaviorsRequest:
   BehaviorDetailsMode details
+  bool include_alias                          // opt-in: alias in details (§5)
+  bool exclude_display_name                   // opt-out: drop display_name (§5)
 ListBehaviorsResponse:
   repeated BehaviorSummary behaviors          // callback-encoded
 BehaviorSummary:                              // slim: normally just local_id + def_fp
@@ -398,6 +410,7 @@ BehaviorSummary:                              // slim: normally just local_id + 
 // batch miss-repair (§5)
 GetBehaviorsRequest:
   repeated u32 behavior_ids                   // .options max_count:32 (fits RX buf)
+  bool include_alias; bool exclude_display_name        // same field selection (§5)
 GetBehaviorsResponse:
   repeated BehaviorEntry behaviors            // callback-encoded
 BehaviorEntry:

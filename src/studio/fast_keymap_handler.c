@@ -314,7 +314,8 @@ static bool encode_metadata_sets(pb_ostream_t *stream, const pb_field_t *field, 
  * function returns) via details->metadata.arg. */
 static void fill_behavior_details(cormoran_fast_keymap_BehaviorDetails *details,
                                   const struct device *dev,
-                                  struct fk_metadata_encode_state *state) {
+                                  struct fk_metadata_encode_state *state, bool include_alias,
+                                  bool exclude_display_name) {
     struct behavior_parameter_metadata desc = {0};
     int ret = behavior_get_parameter_metadata(dev, &desc);
     if (ret < 0) {
@@ -327,10 +328,19 @@ static void fill_behavior_details(cormoran_fast_keymap_BehaviorDetails *details,
     state->i = 0;
 
     *details = (cormoran_fast_keymap_BehaviorDetails)cormoran_fast_keymap_BehaviorDetails_init_zero;
-    details->display_name.funcs.encode = encode_behavior_display_name;
-    details->display_name.arg = (void *)dev;
-    details->alias.funcs.encode = encode_behavior_alias;
-    details->alias.arg = (void *)dev;
+    /* alias is opt-in and display_name opt-out (ListBehaviorsRequest/
+     * GetBehaviorsRequest.include_alias / exclude_display_name): leaving a
+     * callback unset omits that field on the wire. def_fp still hashes the
+     * true alias + display_name regardless -- this only affects the BYTES, not
+     * the fingerprint. */
+    if (!exclude_display_name) {
+        details->display_name.funcs.encode = encode_behavior_display_name;
+        details->display_name.arg = (void *)dev;
+    }
+    if (include_alias) {
+        details->alias.funcs.encode = encode_behavior_alias;
+        details->alias.arg = (void *)dev;
+    }
     details->metadata.funcs.encode = encode_metadata_sets;
     details->metadata.arg = state;
 }
@@ -342,6 +352,8 @@ static void fill_behavior_details(cormoran_fast_keymap_BehaviorDetails *details,
  * size-pass/encode-pass), so it cannot read from a stack-local mode
  * variable. */
 static cormoran_fast_keymap_BehaviorDetailsMode fk_list_behaviors_mode;
+static bool fk_list_behaviors_include_alias;
+static bool fk_list_behaviors_exclude_display_name;
 
 static bool encode_behavior_summaries(pb_ostream_t *stream, const pb_field_t *field,
                                       void *const *arg) {
@@ -366,7 +378,9 @@ static bool encode_behavior_summaries(pb_ostream_t *stream, const pb_field_t *fi
              !fk_behavior_is_standard(beh->device));
         if (want_details) {
             sum.has_details = true;
-            fill_behavior_details(&sum.details, beh->device, &fk_metadata_state);
+            fill_behavior_details(&sum.details, beh->device, &fk_metadata_state,
+                                  fk_list_behaviors_include_alias,
+                                  fk_list_behaviors_exclude_display_name);
         }
 
         if (!pb_encode_submessage(stream, &cormoran_fast_keymap_BehaviorSummary_msg, &sum)) {
@@ -377,9 +391,11 @@ static bool encode_behavior_summaries(pb_ostream_t *stream, const pb_field_t *fi
     return true;
 }
 
-static int handle_list_behaviors(cormoran_fast_keymap_BehaviorDetailsMode mode,
+static int handle_list_behaviors(const cormoran_fast_keymap_ListBehaviorsRequest *req,
                                  cormoran_fast_keymap_Response *resp) {
-    fk_list_behaviors_mode = mode;
+    fk_list_behaviors_mode = req->details;
+    fk_list_behaviors_include_alias = req->include_alias;
+    fk_list_behaviors_exclude_display_name = req->exclude_display_name;
 
     cormoran_fast_keymap_ListBehaviorsResponse *out = &resp->response_type.list_behaviors;
     *out = (cormoran_fast_keymap_ListBehaviorsResponse)
@@ -425,7 +441,8 @@ static bool encode_behavior_entries(pb_ostream_t *stream, const pb_field_t *fiel
         cormoran_fast_keymap_BehaviorEntry entry = cormoran_fast_keymap_BehaviorEntry_init_zero;
         entry.id = id;
         entry.has_details = true;
-        fill_behavior_details(&entry.details, dev, &fk_metadata_state);
+        fill_behavior_details(&entry.details, dev, &fk_metadata_state, req->include_alias,
+                              req->exclude_display_name);
 
         if (!pb_encode_submessage(stream, &cormoran_fast_keymap_BehaviorEntry_msg, &entry)) {
             return false;
@@ -841,7 +858,7 @@ static bool fast_keymap_rpc_handle_request(const zmk_custom_CallRequest *raw_req
         rc = handle_get_snapshot(resp);
         break;
     case cormoran_fast_keymap_Request_list_behaviors_tag:
-        rc = handle_list_behaviors(req.request_type.list_behaviors.details, resp);
+        rc = handle_list_behaviors(&req.request_type.list_behaviors, resp);
         break;
     case cormoran_fast_keymap_Request_get_behaviors_tag:
         rc = handle_get_behaviors(&req.request_type.get_behaviors, resp);

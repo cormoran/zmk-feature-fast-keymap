@@ -177,7 +177,9 @@ const SNAPSHOT = makeSnapshot();
  * ALL -> always; CUSTOM -> only non-standard; NONE -> never. */
 function summaryFor(
   fixture: BehaviorFixture,
-  mode: BehaviorDetailsMode
+  mode: BehaviorDetailsMode,
+  includeAlias: boolean,
+  excludeDisplayName: boolean
 ): BehaviorSummary {
   const shouldInline =
     mode === BehaviorDetailsMode.BEHAVIOR_DETAILS_ALL ||
@@ -188,12 +190,22 @@ function summaryFor(
     localId: fixture.localId,
     defFp: fixture.defFp,
     details: shouldInline
-      ? {
-          alias: fixture.alias,
-          displayName: fixture.displayName,
-          metadata: fixture.metadata,
-        }
+      ? detailsFor(fixture, includeAlias, excludeDisplayName)
       : undefined,
+  };
+}
+
+/** Mirrors the firmware's opt-in alias / opt-out display_name: an omitted
+ * field decodes to proto3's default `""` (SS5). */
+function detailsFor(
+  fixture: BehaviorFixture,
+  includeAlias: boolean,
+  excludeDisplayName: boolean
+): BehaviorDetails {
+  return {
+    alias: includeAlias ? fixture.alias : "",
+    displayName: excludeDisplayName ? "" : fixture.displayName,
+    metadata: fixture.metadata,
   };
 }
 
@@ -220,15 +232,23 @@ function makeDeviceCall(
       return { snapshot };
     }
     if (request.listBehaviors) {
+      const { details, includeAlias, excludeDisplayName } =
+        request.listBehaviors;
       return {
         listBehaviors: {
           behaviors: behaviors.map((b) =>
-            summaryFor(b, request.listBehaviors!.details)
+            summaryFor(
+              b,
+              details,
+              includeAlias ?? false,
+              excludeDisplayName ?? false
+            )
           ),
         },
       };
     }
     if (request.getBehaviors) {
+      const { includeAlias, excludeDisplayName } = request.getBehaviors;
       return {
         getBehaviors: {
           behaviors: request.getBehaviors.behaviorIds.flatMap((id) => {
@@ -237,11 +257,11 @@ function makeDeviceCall(
             return [
               {
                 id,
-                details: {
-                  alias: fixture.alias,
-                  displayName: fixture.displayName,
-                  metadata: fixture.metadata,
-                },
+                details: detailsFor(
+                  fixture,
+                  includeAlias ?? false,
+                  excludeDisplayName ?? false
+                ),
               },
             ];
           }),
@@ -503,6 +523,35 @@ describe("loadFastKeymap", () => {
     expect(custom?.alias).toBe("my_custom");
     expect(custom?.metadata).toEqual(CUSTOM_METADATA);
     expect(model.stats.behaviorsFetched).toBe(1);
+  });
+
+  it("includeAliases:false / includeDisplayNames:false omit those fields on the wire (bundle still fills standard behaviors)", async () => {
+    const { call, requests } = makeDeviceCall([KP_BEHAVIOR, CUSTOM_BEHAVIOR]);
+
+    const model = await loadFastKeymap(call, {
+      deviceKey: DEVICE_KEY,
+      includeAliases: false,
+      includeDisplayNames: false,
+    });
+
+    // The request carries the field-selection flags.
+    const listReq = requests.find((r) => r.listBehaviors)!.listBehaviors!;
+    expect(listReq.includeAlias).toBe(false);
+    expect(listReq.excludeDisplayName).toBe(true);
+
+    // Standard behavior: alias/display_name come from the bundle regardless.
+    const kp = model.behaviors.find((b) => b.localId === 1)!;
+    expect(kp.resolvedFrom).toBe("bundle");
+    expect(kp.alias).toBe("kp");
+    expect(kp.displayName).toBe("Key Press");
+
+    // Custom behavior: inlined WITHOUT alias/display_name -> both empty, but
+    // metadata (never gated) still arrives.
+    const custom = model.behaviors.find((b) => b.localId === 2)!;
+    expect(custom.resolvedFrom).toBe("device");
+    expect(custom.alias).toBe("");
+    expect(custom.displayName).toBe("");
+    expect(custom.metadata).toEqual(CUSTOM_METADATA);
   });
 
   it("a def_fp miss (neither inlined nor bundled) is resolved by exactly one get_behaviors batch", async () => {

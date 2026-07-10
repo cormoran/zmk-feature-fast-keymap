@@ -151,6 +151,19 @@ export interface LoadFastKeymapOptions {
   /** Defaults to `window.localStorage`. Overridable for tests / for
    * environments without a global localStorage. */
   storage?: Storage;
+  /** Whether to ask the device to inline each behavior's `alias` (the
+   * `&<alias>` token) in `list_behaviors`/`get_behaviors` (DESIGN.md SS5).
+   * Defaults to `true` so the returned model can render/export tokens. Set
+   * `false` to save those bytes on a cold load when the consumer never shows
+   * a behavior's alias -- standard behaviors still get their alias from the
+   * bundle, but device-only (custom) behaviors will have an empty `alias`. */
+  includeAliases?: boolean;
+  /** Whether to ask the device to inline each behavior's human `display_name`
+   * (DESIGN.md SS5). Defaults to `true` (opt-out): set `false` to save those
+   * bytes on a cold load when the consumer never shows a behavior's name.
+   * Standard behaviors still get their name from the bundle; device-only
+   * (custom) behaviors will have an empty `displayName`. */
+  includeDisplayNames?: boolean;
 }
 
 function defaultStorage(): Storage | undefined {
@@ -195,6 +208,8 @@ export async function loadFastKeymap(
 ): Promise<FastKeymapModel> {
   const storage = options.storage ?? defaultStorage();
   const deviceKey = options.deviceKey ?? "default-device";
+  const includeAliases = options.includeAliases ?? true;
+  const includeDisplayNames = options.includeDisplayNames ?? true;
 
   const snapshotResponse = await callChecked(call, { getSnapshot: true });
   const snapshot = snapshotResponse.snapshot;
@@ -214,7 +229,9 @@ export async function loadFastKeymap(
     storage,
     deviceKey,
     snapshot,
-    bundleTrusted
+    bundleTrusted,
+    includeAliases,
+    includeDisplayNames
   );
   const layersResult = await loadLayers(call, storage, deviceKey, snapshot);
   const layoutsResult = await loadPhysicalLayouts(
@@ -375,7 +392,9 @@ async function loadBehaviors(
   storage: Storage | undefined,
   deviceKey: string,
   snapshot: Snapshot,
-  bundleTrusted: boolean
+  bundleTrusted: boolean,
+  includeAlias: boolean,
+  includeDisplayName: boolean
 ): Promise<{
   behaviors: FastKeymapBehavior[];
   fromCache: boolean;
@@ -383,6 +402,7 @@ async function loadBehaviors(
   cachedCount: number;
   fetchedCount: number;
 }> {
+  const excludeDisplayName = !includeDisplayName;
   // The width (bits) the device serves def_fp at this session (SS4). Bundle
   // and cache def_fp keys are masked to it; 0/absent means legacy 16-bit.
   const servedBits = snapshot.defFpBits || 16;
@@ -448,7 +468,7 @@ async function loadBehaviors(
       : BehaviorDetailsMode.BEHAVIOR_DETAILS_NONE;
 
   const listResponse = await callChecked(call, {
-    listBehaviors: { details: mode },
+    listBehaviors: { details: mode, includeAlias, excludeDisplayName },
   });
   const summaries = listResponse.listBehaviors?.behaviors ?? [];
 
@@ -506,7 +526,7 @@ async function loadBehaviors(
   const missLocalIds = [...missIndexByLocalId.keys()];
   for (const idsChunk of chunk(missLocalIds, GET_BEHAVIORS_CHUNK_SIZE)) {
     const batchResponse = await callChecked(call, {
-      getBehaviors: { behaviorIds: idsChunk },
+      getBehaviors: { behaviorIds: idsChunk, includeAlias, excludeDisplayName },
     });
     for (const entry of batchResponse.getBehaviors?.behaviors ?? []) {
       const index = missIndexByLocalId.get(entry.id);

@@ -846,6 +846,10 @@ static bool call_list_behaviors(cormoran_fast_keymap_BehaviorDetailsMode mode,
     req.request_type.list_behaviors = (cormoran_fast_keymap_ListBehaviorsRequest)
         cormoran_fast_keymap_ListBehaviorsRequest_init_zero;
     req.request_type.list_behaviors.details = mode;
+    /* Ask for the alias too (opt-in) so the def_fp encoder-consistency checks
+     * that recompute from the served alias have it; display_name is on by
+     * default. The dedicated field-selection test covers omitting them. */
+    req.request_type.list_behaviors.include_alias = true;
 
     cormoran_fast_keymap_Response resp = cormoran_fast_keymap_Response_init_zero;
     resp.which_response_type = cormoran_fast_keymap_Response_list_behaviors_tag;
@@ -863,6 +867,110 @@ static bool call_list_behaviors(cormoran_fast_keymap_BehaviorDetailsMode mode,
         return false;
     }
     return true;
+}
+
+/* Like call_list_behaviors but with explicit include_alias / exclude_display_name
+ * flags, for the field-selection test. */
+static bool issue_list_behaviors(cormoran_fast_keymap_BehaviorDetailsMode mode, bool include_alias,
+                                 bool exclude_display_name,
+                                 behavior_summary_capture_t *captured) {
+    cormoran_fast_keymap_Request req = cormoran_fast_keymap_Request_init_zero;
+    req.which_request_type = cormoran_fast_keymap_Request_list_behaviors_tag;
+    req.request_type.list_behaviors = (cormoran_fast_keymap_ListBehaviorsRequest)
+        cormoran_fast_keymap_ListBehaviorsRequest_init_zero;
+    req.request_type.list_behaviors.details = mode;
+    req.request_type.list_behaviors.include_alias = include_alias;
+    req.request_type.list_behaviors.exclude_display_name = exclude_display_name;
+
+    cormoran_fast_keymap_Response resp = cormoran_fast_keymap_Response_init_zero;
+    resp.which_response_type = cormoran_fast_keymap_Response_list_behaviors_tag;
+    resp.response_type.list_behaviors = (cormoran_fast_keymap_ListBehaviorsResponse)
+        cormoran_fast_keymap_ListBehaviorsResponse_init_zero;
+    resp.response_type.list_behaviors.behaviors.funcs.decode = decode_behavior_summary_cb;
+    resp.response_type.list_behaviors.behaviors.arg = captured;
+
+    if (!call_fast_keymap_rpc(&req, &resp)) {
+        return false;
+    }
+    return resp.which_response_type == cormoran_fast_keymap_Response_list_behaviors_tag;
+}
+
+static const struct behavior_summary_entry *
+find_summary_by_local_id(const behavior_summary_capture_t *cap, uint32_t local_id) {
+    for (size_t i = 0; i < cap->count; i++) {
+        if (cap->entries[i].local_id == local_id) {
+            return &cap->entries[i];
+        }
+    }
+    return NULL;
+}
+
+/* alias is opt-in and display_name opt-out (ListBehaviorsRequest.include_alias
+ * / exclude_display_name): assert each flag actually controls whether that
+ * field rides the wire, and that def_fp is unaffected (it hashes the true
+ * alias/display_name regardless of what's served). */
+static int test_list_behaviors_field_selection(void) {
+    static behavior_summary_capture_t no_alias;
+    static behavior_summary_capture_t no_name;
+    no_alias = (behavior_summary_capture_t){0};
+    no_name = (behavior_summary_capture_t){0};
+
+    /* ALL mode so every summary carries inline details. */
+    if (!issue_list_behaviors(cormoran_fast_keymap_BehaviorDetailsMode_BEHAVIOR_DETAILS_ALL,
+                              /*include_alias=*/false, /*exclude_display_name=*/false, &no_alias) ||
+        !issue_list_behaviors(cormoran_fast_keymap_BehaviorDetailsMode_BEHAVIOR_DETAILS_ALL,
+                              /*include_alias=*/true, /*exclude_display_name=*/true, &no_name)) {
+        return -EINVAL;
+    }
+    if (no_alias.count == 0 || no_alias.count != no_name.count) {
+        LOG_ERR("field-selection list_behaviors counts differ (%u vs %u)",
+                (unsigned int)no_alias.count, (unsigned int)no_name.count);
+        return -EINVAL;
+    }
+
+    for (size_t i = 0; i < no_alias.count; i++) {
+        const struct behavior_summary_entry *a = &no_alias.entries[i];
+        if (!a->has_details) {
+            LOG_ERR("ALL mode did not inline details for local_id %u", a->local_id);
+            return -EINVAL;
+        }
+        /* include_alias=false -> alias omitted; display_name still present. */
+        if (a->alias[0] != '\0') {
+            LOG_ERR("include_alias=false but local_id %u served alias '%s'", a->local_id, a->alias);
+            return -EINVAL;
+        }
+        if (a->display_name[0] == '\0') {
+            LOG_ERR("exclude_display_name=false but local_id %u served no display_name",
+                    a->local_id);
+            return -EINVAL;
+        }
+
+        /* exclude_display_name=true -> display_name omitted; alias present. */
+        const struct behavior_summary_entry *b = find_summary_by_local_id(&no_name, a->local_id);
+        if (!b) {
+            LOG_ERR("local_id %u missing from the second (no-display-name) list", a->local_id);
+            return -EINVAL;
+        }
+        if (b->alias[0] == '\0') {
+            LOG_ERR("include_alias=true but local_id %u served no alias", b->local_id);
+            return -EINVAL;
+        }
+        if (b->display_name[0] != '\0') {
+            LOG_ERR("exclude_display_name=true but local_id %u served display_name '%s'",
+                    b->local_id, b->display_name);
+            return -EINVAL;
+        }
+
+        /* Field selection must not change the fingerprint. */
+        if (a->def_fp != b->def_fp) {
+            LOG_ERR("def_fp for local_id %u changed with field selection (%u vs %u)", a->local_id,
+                    a->def_fp, b->def_fp);
+            return -EINVAL;
+        }
+    }
+
+    LOG_INF("PASS: fast_keymap_list_behaviors_field_selection");
+    return 0;
 }
 
 /* Covers DESIGN.md SS5's three BehaviorDetailsMode semantics, def_fp
@@ -1071,6 +1179,7 @@ static int test_get_behaviors_batch(void) {
     req.request_type.get_behaviors.behavior_ids[0] = kp->local_id;
     req.request_type.get_behaviors.behavior_ids[1] = myht->local_id;
     req.request_type.get_behaviors.behavior_ids[2] = unknown_id;
+    req.request_type.get_behaviors.include_alias = true; /* recompute needs the alias */
 
     cormoran_fast_keymap_Response resp = cormoran_fast_keymap_Response_init_zero;
     static behavior_entry_capture_array_t entries_cap;
@@ -1642,6 +1751,11 @@ static int fast_keymap_rpc_test_init(void) {
     }
 
     ret = test_list_behaviors_modes_and_def_fp();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_list_behaviors_field_selection();
     if (ret < 0) {
         return ret;
     }
