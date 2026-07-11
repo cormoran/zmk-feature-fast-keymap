@@ -79,21 +79,37 @@ static uint32_t crc_str_u8len(uint32_t seed, const char *s) {
     return seed;
 }
 
-uint32_t fk_crc_binding(uint32_t seed, const struct zmk_behavior_binding *binding) {
-    int32_t local_id = -1;
-    uint32_t param1 = 0;
-    uint32_t param2 = 0;
+/* Resolve a binding's canonical fields. zmk_behavior_get_local_id() is an O(N)
+ * scan over the behavior table, so callers that need to feed the same binding
+ * into more than one CRC seed (e.g. fk_mutable_populate: whole-keymap + per-layer)
+ * should resolve ONCE with this and CRC the fields into each seed via
+ * fk_crc_binding_fields(), rather than calling fk_crc_binding() twice. */
+static void fk_resolve_binding(const struct zmk_behavior_binding *binding, int32_t *local_id,
+                               uint32_t *param1, uint32_t *param2) {
+    *local_id = -1;
+    *param1 = 0;
+    *param2 = 0;
 
     if (binding && binding->behavior_dev) {
-        local_id = (int32_t)zmk_behavior_get_local_id(binding->behavior_dev);
-        param1 = binding->param1;
-        param2 = binding->param2;
+        *local_id = (int32_t)zmk_behavior_get_local_id(binding->behavior_dev);
+        *param1 = binding->param1;
+        *param2 = binding->param2;
     }
+}
 
+static uint32_t fk_crc_binding_fields(uint32_t seed, int32_t local_id, uint32_t param1,
+                                      uint32_t param2) {
     seed = crc_i32le(seed, local_id);
     seed = crc_u32le(seed, param1);
     seed = crc_u32le(seed, param2);
     return seed;
+}
+
+uint32_t fk_crc_binding(uint32_t seed, const struct zmk_behavior_binding *binding) {
+    int32_t local_id;
+    uint32_t param1, param2;
+    fk_resolve_binding(binding, &local_id, &param1, &param2);
+    return fk_crc_binding_fields(seed, local_id, param1, param2);
 }
 
 uint16_t fk_binding_count(void) {
@@ -608,9 +624,15 @@ static void fk_mutable_populate(int selected) {
         for (uint16_t b = 0; b < binding_count; b++) {
             const struct zmk_behavior_binding *binding =
                 zmk_keymap_get_layer_binding_at_idx(layer_id, b);
-            /* One fetch feeds both accumulators (Part A). */
-            keymap_seed = fk_crc_binding(keymap_seed, binding);
-            layer_seed = fk_crc_binding(layer_seed, binding);
+            /* One fetch AND one local_id resolution feed both accumulators
+             * (Part A). Resolving once halves the O(N) behavior-table scan vs
+             * calling fk_crc_binding() twice; the CRC bytes/order are identical
+             * so keymap_fp / per-layer fp values are unchanged. */
+            int32_t local_id;
+            uint32_t param1, param2;
+            fk_resolve_binding(binding, &local_id, &param1, &param2);
+            keymap_seed = fk_crc_binding_fields(keymap_seed, local_id, param1, param2);
+            layer_seed = fk_crc_binding_fields(layer_seed, local_id, param1, param2);
         }
 
         if (layer_id < ZMK_KEYMAP_LAYERS_LEN) {
