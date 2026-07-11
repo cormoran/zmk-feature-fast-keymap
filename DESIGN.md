@@ -199,6 +199,57 @@ speed. This is pure memoization — the computed fingerprint VALUES are
 byte-identical whether the cache is on or off; in particular `behaviors_fp`'s
 `crc(local_id + def_fp)` composition (below) is unchanged either way.
 
+**Single shared walk + mutable-fp cache (`keymap_fp` / per-layer current
+`fp` / `physical_layout_fp`).** These three are MUTABLE (they change on keymap
+edits and active-layout switches), so unlike the memoized group above they
+can't be cached forever. Two problems: (a) computing them naively re-walks the
+same current bindings once for `keymap_fp` plus once per layer for each
+per-layer `fp` — and the per-binding cost is dominated by the
+`zmk_keymap_get_layer_binding_at_idx()` FETCH, not the CRC; (b) a repeat
+`get_snapshot` with nothing edited redoes all of that. `src/fingerprint.c`
+fixes both:
+
+- **Dedup (one walk).** A single pass over each layer's current bindings feeds
+  BOTH accumulators at once: the whole-keymap running seed (`keymap_fp`, with
+  each layer's `u8 layer_id` + `str16 name` interleaved) AND that layer's
+  fresh-seed accumulator (its per-layer `fp`). Each binding is fetched exactly
+  once. `physical_layout_fp` is produced in the same populate (a cheap
+  separate walk over the physical-layout list). So `get_snapshot` walks the
+  current bindings once total instead of ~`1 + layers` times. The VALUES are
+  byte-identical to the old per-fp walks — same CRC inputs, same order, just
+  fetched once (a native_sim test recomputes all three independently and
+  asserts equality). This is a pure computation-sharing refactor of opaque
+  fps, so it needs no `FK_DEFINITION_VERSION` bump.
+- **Invalidated cache (`CONFIG_ZMK_FAST_KEYMAP_FP_CACHE`).** The populated
+  values persist across calls, so a warm `get_snapshot` (nothing edited since
+  the last one) is free. Because the fps are mutable, the cache is invalidated
+  (recomputed lazily on the next read) by three robust-for-a-read-only-module
+  triggers:
+  1. **Any `zmk_studio_rpc_notification`.** ZMK has no granular
+     keymap-changed event, but every Studio keymap mutation
+     (`set_layer_binding` / move / add / save / discard) raises
+     `unsaved_changes_status_changed`, delivered as one of these
+     notifications. A `ZMK_LISTENER`/`ZMK_SUBSCRIPTION` in `src/fingerprint.c`
+     drops the cache on ANY of them — safe here: worst case is one extra
+     recompute, and during a normal load no notifications fire so the cache
+     stays warm. The listener only clears a flag (no recompute in the
+     listener).
+  2. **Active-physical-layout switch.** Checked on every read by comparing
+     `zmk_physical_layouts_get_selected()` to the index the cache was filled
+     under. Layout switches change binding positions and don't reliably raise
+     a subscribable event, so this is checked directly (in both cache modes).
+  3. **Boot / settings-load.** The flag starts invalid, so the first
+     `get_snapshot` populates lazily.
+
+  RPCs (and this listener, on the same serialized event/RPC path) never
+  overlap, so no locking is needed. When the cache is compiled out the dedup
+  still applies WITHIN a single `get_snapshot` (the handler marks the shared
+  state invalid at the snapshot's start so it recomputes exactly once, with no
+  cross-call persistence) — identical values either way. When
+  `CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER` is off there is no separate stock
+  keymap, so `default_keymap_fp` just returns `keymap_fp` and per-layer
+  `default_fp` returns the per-layer current `fp` (no second walk).
+
 Canonical binding bytes (used by the keymap fps): `i32 behavior_local_id`
 (LE; `-1` when `behavior_dev == NULL`), `u32 param1` (LE), `u32 param2` (LE).
 
@@ -240,19 +291,21 @@ Groups:
 - **per-layer `fp` / `default_fp`** (in the Snapshot `LayerFingerprint`) — the
   same, for one layer's current vs default bindings, so the client fetches only
   layers whose `fp` changed. `default_fp` is memoized per layer the same way as
-  `default_keymap_fp` above; the current `fp` is always recomputed (mutable —
-  changes on keymap edits).
+  `default_keymap_fp` above; the current `fp` is produced by the shared
+  single-walk mutable-fp cache (above) alongside `keymap_fp`.
 - **`keymap_fp`** — over all layers' current bindings + layer names + active
-  physical-layout index. One "did anything in the keymap change" key. Always
-  recomputed (mutable — changes on keymap edits and layout switches).
+  physical-layout index. One "did anything in the keymap change" key. Mutable
+  (changes on keymap edits and layout switches) — produced/cached by the
+  single shared walk + mutable-fp cache described above.
 - **per-layout physical `fp`** (in `PhysicalLayoutSummary`) — over one layout's
   `str16 name` + `u16 key_count` + per key `i16 width,height,x,y,r,rx,ry`.
   Device-opaque (the web caches+compares it, never recomputes it). Compile-time
   constant per layout — memoized forever, keyed by the layout pointer.
 - **`physical_layout_fp`** — over `u8 active_layout_index` then, per layout, that
   layout's per-layout-`fp`-preimage bytes (name + keys, as above). Whole-set
-  skip key. Includes the active layout index (mutable), so always recomputed;
-  cheap since layout counts are small.
+  skip key. Includes the active layout index (mutable), so it rides the shared
+  mutable-fp cache (above) rather than the immutable memoization; cheap either
+  way since layout counts are small.
 
 ## 5. Behaviors: slim list + on-demand details (minimize redundant transport)
 

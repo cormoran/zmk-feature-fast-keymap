@@ -128,6 +128,16 @@ static void compute_snapshot_layers(void) {
 }
 
 static int handle_get_snapshot(cormoran_fast_keymap_Response *resp) {
+#if !IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
+    /* Cache compiled out: no invalidation listener exists, so drop the shared
+     * mutable-fp state at the start of every snapshot. The first read below
+     * then repopulates it once (Part A dedup still applies WITHIN this
+     * snapshot -- one binding walk total -- while nothing persists across
+     * snapshots). With the cache on, invalidation is event/layout driven (see
+     * fingerprint.c) so this force-drop is unnecessary. */
+    fk_fp_mutable_invalidate();
+#endif
+
     compute_snapshot_layers();
 
     cormoran_fast_keymap_Snapshot *snap = &resp->response_type.snapshot;
@@ -313,9 +323,8 @@ static bool encode_metadata_sets(pb_ostream_t *stream, const pb_field_t *field, 
  * later (once for the size pass, once for the encode pass, both after this
  * function returns) via details->metadata.arg. */
 static void fill_behavior_details(cormoran_fast_keymap_BehaviorDetails *details,
-                                  const struct device *dev,
-                                  struct fk_metadata_encode_state *state, bool include_alias,
-                                  bool exclude_display_name) {
+                                  const struct device *dev, struct fk_metadata_encode_state *state,
+                                  bool include_alias, bool exclude_display_name) {
     struct behavior_parameter_metadata desc = {0};
     int ret = behavior_get_parameter_metadata(dev, &desc);
     if (ret < 0) {
@@ -664,8 +673,7 @@ static int handle_get_layers(const cormoran_fast_keymap_GetLayersRequest *req,
     fk_get_layers_req = *req;
 
     cormoran_fast_keymap_GetLayersResponse *out = &resp->response_type.get_layers;
-    *out =
-        (cormoran_fast_keymap_GetLayersResponse)cormoran_fast_keymap_GetLayersResponse_init_zero;
+    *out = (cormoran_fast_keymap_GetLayersResponse)cormoran_fast_keymap_GetLayersResponse_init_zero;
     out->layers.funcs.encode = encode_layers;
     out->layers.arg = &fk_get_layers_req;
 

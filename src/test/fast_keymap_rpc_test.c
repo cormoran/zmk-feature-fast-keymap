@@ -21,8 +21,11 @@
 
 #include <drivers/behavior.h>
 #include <zmk/behavior.h>
+#include <zmk/event_manager.h>
 #include <zmk/keymap.h>
 #include <zmk/matrix.h>
+#include <zmk/physical_layouts.h>
+#include <zmk/studio/rpc.h>
 
 #include "../fingerprint.h"
 
@@ -816,8 +819,7 @@ static int test_get_layers_batch(void) {
         }
 
         for (uint16_t b = 0; b < ZMK_KEYMAP_LEN; b++) {
-            const struct zmk_behavior_binding *live =
-                zmk_keymap_get_layer_binding_at_idx(e->id, b);
+            const struct zmk_behavior_binding *live = zmk_keymap_get_layer_binding_at_idx(e->id, b);
             int32_t want_id = -1;
             uint32_t want_p1 = 0, want_p2 = 0;
             if (live && live->behavior_dev) {
@@ -872,8 +874,7 @@ static bool call_list_behaviors(cormoran_fast_keymap_BehaviorDetailsMode mode,
 /* Like call_list_behaviors but with explicit include_alias / exclude_display_name
  * flags, for the field-selection test. */
 static bool issue_list_behaviors(cormoran_fast_keymap_BehaviorDetailsMode mode, bool include_alias,
-                                 bool exclude_display_name,
-                                 behavior_summary_capture_t *captured) {
+                                 bool exclude_display_name, behavior_summary_capture_t *captured) {
     cormoran_fast_keymap_Request req = cormoran_fast_keymap_Request_init_zero;
     req.which_request_type = cormoran_fast_keymap_Request_list_behaviors_tag;
     req.request_type.list_behaviors = (cormoran_fast_keymap_ListBehaviorsRequest)
@@ -1432,6 +1433,233 @@ static int test_physical_layouts(void) {
     return 0;
 }
 
+/* -- dedup + mutable-fp-cache value preservation -----------------------
+ *
+ * Independent (test-local) recomputation of the three MUTABLE opaque fps
+ * (keymap_fp, per-layer current fp, physical_layout_fp), from the live ZMK
+ * keymap/layout data, using DESIGN.md SS4's canonical byte layout -- the same
+ * straightforward per-fp walk the firmware did BEFORE the dedup/cache refactor
+ * (i.e. exactly what the cache-OFF path must produce). Asserting the served
+ * fps equal these proves the single shared walk + the cache preserve the
+ * values byte-for-byte (cache on == cache off == pre-refactor). */
+static uint32_t test_crc_i16le(uint32_t seed, int16_t v) {
+    return test_crc_u16le(seed, (uint16_t)v);
+}
+static uint32_t test_crc_i32le(uint32_t seed, int32_t v) {
+    return test_crc_u32le(seed, (uint32_t)v);
+}
+
+static uint32_t test_crc_binding(uint32_t seed, const struct zmk_behavior_binding *b) {
+    int32_t local_id = -1;
+    uint32_t p1 = 0, p2 = 0;
+    if (b && b->behavior_dev) {
+        local_id = (int32_t)zmk_behavior_get_local_id(b->behavior_dev);
+        p1 = b->param1;
+        p2 = b->param2;
+    }
+    seed = test_crc_i32le(seed, local_id);
+    seed = test_crc_u32le(seed, p1);
+    seed = test_crc_u32le(seed, p2);
+    return seed;
+}
+
+static uint32_t ref_keymap_fp(void) {
+    uint32_t seed = 0;
+    seed = test_crc_u8(seed, (uint8_t)zmk_physical_layouts_get_selected());
+    uint16_t binding_count = fk_binding_count();
+
+    for (zmk_keymap_layer_index_t idx = 0; idx < ZMK_KEYMAP_LAYERS_LEN; idx++) {
+        zmk_keymap_layer_id_t layer_id = zmk_keymap_layer_index_to_id(idx);
+        if (layer_id == ZMK_KEYMAP_LAYER_ID_INVAL) {
+            break;
+        }
+        seed = test_crc_u8(seed, layer_id);
+        seed = test_crc_str16(seed, zmk_keymap_layer_name(layer_id));
+        for (uint16_t b = 0; b < binding_count; b++) {
+            seed = test_crc_binding(seed, zmk_keymap_get_layer_binding_at_idx(layer_id, b));
+        }
+    }
+    return seed & 0xFFFFu;
+}
+
+static uint32_t ref_layer_current_fp(zmk_keymap_layer_id_t layer_id) {
+    uint32_t seed = 0;
+    uint16_t binding_count = fk_binding_count();
+    for (uint16_t b = 0; b < binding_count; b++) {
+        seed = test_crc_binding(seed, zmk_keymap_get_layer_binding_at_idx(layer_id, b));
+    }
+    return seed & 0xFFFFu;
+}
+
+static uint32_t ref_physical_layout_fp(void) {
+    uint32_t seed = 0;
+    seed = test_crc_u8(seed, (uint8_t)zmk_physical_layouts_get_selected());
+
+    struct zmk_physical_layout const *const *layouts;
+    size_t n = zmk_physical_layouts_get_list(&layouts);
+    for (size_t i = 0; i < n; i++) {
+        const struct zmk_physical_layout *l = layouts[i];
+        seed = test_crc_str16(seed, l->display_name);
+        seed = test_crc_u16le(seed, (uint16_t)l->keys_len);
+        for (size_t k = 0; k < l->keys_len; k++) {
+            const struct zmk_key_physical_attrs *a = &l->keys[k];
+            seed = test_crc_i16le(seed, a->width);
+            seed = test_crc_i16le(seed, a->height);
+            seed = test_crc_i16le(seed, a->x);
+            seed = test_crc_i16le(seed, a->y);
+#if IS_ENABLED(CONFIG_ZMK_PHYSICAL_LAYOUT_KEY_ROTATION)
+            seed = test_crc_i16le(seed, a->r);
+            seed = test_crc_i16le(seed, a->rx);
+            seed = test_crc_i16le(seed, a->ry);
+#else
+            seed = test_crc_i16le(seed, 0);
+            seed = test_crc_i16le(seed, 0);
+            seed = test_crc_i16le(seed, 0);
+#endif
+        }
+    }
+    return seed & 0xFFFFu;
+}
+
+/* Fetch a snapshot, capturing its per-layer fingerprints. */
+static bool fetch_snapshot(cormoran_fast_keymap_Response *resp, layer_fp_capture_t *layers) {
+    cormoran_fast_keymap_Request req = cormoran_fast_keymap_Request_init_zero;
+    req.which_request_type = cormoran_fast_keymap_Request_get_snapshot_tag;
+    req.request_type.get_snapshot = true;
+
+    *resp = (cormoran_fast_keymap_Response)cormoran_fast_keymap_Response_init_zero;
+    *layers = (layer_fp_capture_t){0};
+    resp->which_response_type = cormoran_fast_keymap_Response_snapshot_tag;
+    resp->response_type.snapshot =
+        (cormoran_fast_keymap_Snapshot)cormoran_fast_keymap_Snapshot_init_zero;
+    resp->response_type.snapshot.layers.funcs.decode = decode_layer_fp_cb;
+    resp->response_type.snapshot.layers.arg = layers;
+    if (!call_fast_keymap_rpc(&req, resp)) {
+        return false;
+    }
+    return resp->which_response_type == cormoran_fast_keymap_Response_snapshot_tag;
+}
+
+/* (i) served mutable fps match an independent recompute (dedup preserves the
+ * exact values, and the cached path equals the cache-off/direct path);
+ * (ii) after an edit + a cache invalidation, keymap_fp + the edited layer's
+ * current fp change, while def_fp/behaviors_fp stay constant; (iii) a warm
+ * read of the same state returns identical values. Runs before
+ * test_edited_diff_and_default() and restores the keymap it touches, so it
+ * leaves state clean for later tests. */
+static int test_dedup_and_cache_values(void) {
+    cormoran_fast_keymap_Response snap;
+    layer_fp_capture_t layers;
+    if (!fetch_snapshot(&snap, &layers)) {
+        return -EINVAL;
+    }
+
+    /* (i) keymap_fp / physical_layout_fp / each per-layer current fp equal the
+     * independent recomputation. */
+    uint32_t want_keymap = ref_keymap_fp();
+    if (snap.response_type.snapshot.keymap_fp != want_keymap) {
+        LOG_ERR("keymap_fp %u != independent recompute %u (dedup altered the value)",
+                snap.response_type.snapshot.keymap_fp, want_keymap);
+        return -EINVAL;
+    }
+    uint32_t want_phys = ref_physical_layout_fp();
+    if (snap.response_type.snapshot.physical_layout_fp != want_phys) {
+        LOG_ERR("physical_layout_fp %u != independent recompute %u",
+                snap.response_type.snapshot.physical_layout_fp, want_phys);
+        return -EINVAL;
+    }
+    for (size_t i = 0; i < layers.count; i++) {
+        uint32_t want = ref_layer_current_fp(layers.entries[i].id);
+        if (layers.entries[i].fp != want) {
+            LOG_ERR("layer %u current fp %u != independent recompute %u (dedup altered the value)",
+                    layers.entries[i].id, layers.entries[i].fp, want);
+            return -EINVAL;
+        }
+    }
+
+    /* (iii) a warm read (same state, no edits) returns byte-identical values. */
+    cormoran_fast_keymap_Response snap2;
+    layer_fp_capture_t layers2;
+    if (!fetch_snapshot(&snap2, &layers2)) {
+        return -EINVAL;
+    }
+    if (snap2.response_type.snapshot.keymap_fp != snap.response_type.snapshot.keymap_fp ||
+        snap2.response_type.snapshot.physical_layout_fp !=
+            snap.response_type.snapshot.physical_layout_fp ||
+        snap2.response_type.snapshot.behaviors_fp != snap.response_type.snapshot.behaviors_fp) {
+        LOG_ERR("warm snapshot read returned different fingerprints");
+        return -EINVAL;
+    }
+
+    /* (ii) edit a binding, invalidate via the REAL Studio RPC notification
+     * (the production invalidation path -- trigger #1), and assert keymap_fp +
+     * the edited layer's current fp change while behaviors_fp stays constant.
+     * Edit layer 1 position 0 and restore it afterwards so this test is
+     * order-independent. */
+    const zmk_keymap_layer_id_t edit_layer = 1;
+    const struct zmk_behavior_binding *orig = zmk_keymap_get_layer_binding_at_idx(edit_layer, 0);
+    struct zmk_behavior_binding saved = orig ? *orig : (struct zmk_behavior_binding){0};
+
+    struct zmk_behavior_binding edited = {
+        .behavior_dev = "key_press", .param1 = 0x1234, .param2 = 0};
+    if (zmk_keymap_set_layer_binding_at_idx(edit_layer, 0, edited) < 0) {
+        LOG_ERR("dedup test: set_layer_binding_at_idx(edit) failed");
+        return -EINVAL;
+    }
+    /* Model what a real Studio edit does: raise the notification the cache
+     * listens on (no-op when the FP cache is compiled out -- the handler
+     * force-recomputes each snapshot in that case). */
+    raise_zmk_studio_rpc_notification((struct zmk_studio_rpc_notification){0});
+
+    cormoran_fast_keymap_Response after;
+    layer_fp_capture_t after_layers;
+    if (!fetch_snapshot(&after, &after_layers)) {
+        return -EINVAL;
+    }
+
+    if (after.response_type.snapshot.keymap_fp == snap.response_type.snapshot.keymap_fp) {
+        LOG_ERR("keymap_fp did not change after an edit + invalidation");
+        return -EINVAL;
+    }
+    if (after.response_type.snapshot.behaviors_fp != snap.response_type.snapshot.behaviors_fp) {
+        LOG_ERR("behaviors_fp changed after a keymap edit (must be immutable)");
+        return -EINVAL;
+    }
+    const struct layer_fp_entry *before_l1 = find_layer_fp(&layers, edit_layer);
+    const struct layer_fp_entry *after_l1 = find_layer_fp(&after_layers, edit_layer);
+    if (!before_l1 || !after_l1 || before_l1->fp == after_l1->fp) {
+        LOG_ERR("edited layer's current fp did not change");
+        return -EINVAL;
+    }
+    /* Served fp still matches an independent recompute of the EDITED keymap. */
+    if (after_l1->fp != ref_layer_current_fp(edit_layer) ||
+        after.response_type.snapshot.keymap_fp != ref_keymap_fp()) {
+        LOG_ERR("post-edit fps don't match independent recompute");
+        return -EINVAL;
+    }
+
+    /* Restore the original binding + invalidate, leaving a clean state. */
+    if (zmk_keymap_set_layer_binding_at_idx(edit_layer, 0, saved) < 0) {
+        LOG_ERR("dedup test: set_layer_binding_at_idx(restore) failed");
+        return -EINVAL;
+    }
+    raise_zmk_studio_rpc_notification((struct zmk_studio_rpc_notification){0});
+
+    cormoran_fast_keymap_Response restored;
+    layer_fp_capture_t restored_layers;
+    if (!fetch_snapshot(&restored, &restored_layers)) {
+        return -EINVAL;
+    }
+    if (restored.response_type.snapshot.keymap_fp != snap.response_type.snapshot.keymap_fp) {
+        LOG_ERR("keymap_fp not restored to original after undoing the edit (%u vs %u)",
+                restored.response_type.snapshot.keymap_fp, snap.response_type.snapshot.keymap_fp);
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: fast_keymap_dedup_and_cache_values");
+    return 0;
+}
+
 static int test_edited_diff_and_default(void) {
 #if !IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER)
     /* Without CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER the stock-keymap accessor
@@ -1489,6 +1717,12 @@ static int test_edited_diff_and_default(void) {
         LOG_ERR("zmk_keymap_set_layer_binding_at_idx failed: %d", ret);
         return -EINVAL;
     }
+    /* A real Studio edit goes through the official keymap subsystem, which
+     * raises this notification; the mutable-fp cache (fingerprint.c) listens
+     * on it to invalidate. This test edits the core keymap API directly, so it
+     * must raise the notification itself for keymap_fp to reflect the edit
+     * under CONFIG_ZMK_FAST_KEYMAP_FP_CACHE. */
+    raise_zmk_studio_rpc_notification((struct zmk_studio_rpc_notification){0});
 
     cormoran_fast_keymap_Response after = cormoran_fast_keymap_Response_init_zero;
     layer_fp_capture_t after_layers = {0};
@@ -1771,6 +2005,11 @@ static int fast_keymap_rpc_test_init(void) {
     }
 
     ret = test_invalid_requests();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_dedup_and_cache_values();
     if (ret < 0) {
         return ret;
     }

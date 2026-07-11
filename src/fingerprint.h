@@ -82,22 +82,33 @@ uint32_t fk_fp_behavior_def(const struct device *dev);
  * on. See fingerprint.c / DESIGN.md SS4. */
 uint8_t fk_def_fp_bits(void);
 
-/** default_keymap_fp: over every layer's DT-stock bindings (SS4). Equals
- * fk_fp_keymap_bindings_only() when CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER is off
- * (no separate stock copy exists; default == current). Under
- * CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER, memoized and invalidated whenever the
- * active physical layout changes (fingerprint.c) when
- * CONFIG_ZMK_FAST_KEYMAP_FP_CACHE is also on (the default); the #else
- * fallback (either config off) is always recomputed -- the fp value is
- * identical in every case. */
+/** default_keymap_fp: over every layer's DT-stock bindings (SS4). When
+ * CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER is off there is no separate stock copy
+ * (default == current), so this simply returns fk_fp_keymap() -- no second
+ * walk. Under CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER it walks the stock bindings
+ * and, when CONFIG_ZMK_FAST_KEYMAP_FP_CACHE is also on (the default), memoizes
+ * the result, invalidated whenever the active physical layout changes
+ * (fingerprint.c); with the cache off it is recomputed each call -- the fp
+ * value is identical either way. */
 uint32_t fk_fp_default_keymap(void);
 
-/** keymap_fp: over all layers' current bindings + layer names + the active
- * physical-layout index (SS4). */
+/** keymap_fp: over the active physical-layout index, then all layers' current
+ * bindings + layer names (SS4). Mutable. Produced together with every
+ * per-layer current fp and physical_layout_fp from a single shared binding
+ * walk (Part A dedup) and, under CONFIG_ZMK_FAST_KEYMAP_FP_CACHE, cached until
+ * a Studio RPC notification or an active-layout switch invalidates it
+ * (fingerprint.c). Byte-identical value whether the cache is on or off. */
 uint32_t fk_fp_keymap(void);
 
-/** physical_layout_fp: over the canonical physical layouts (SS4). */
+/** physical_layout_fp: over the canonical physical layouts (SS4). Shares the
+ * mutable dedup/cache with fk_fp_keymap() (fingerprint.c). */
 uint32_t fk_fp_physical_layout(void);
+
+/** Invalidate the mutable-keymap fp cache (keymap_fp / per-layer current fp /
+ * physical_layout_fp) so the next read recomputes. Called from the Studio RPC
+ * notification listener and, when CONFIG_ZMK_FAST_KEYMAP_FP_CACHE is off, by
+ * the snapshot handler to force a single fresh compute per snapshot. */
+void fk_fp_mutable_invalidate(void);
 
 /** per-layout physical `fp` (SS4/SS6): one layout's `str16 name` + `u16
  * key_count` + per key `i16 width,height,x,y,r,rx,ry` (rotation fields 0
@@ -111,9 +122,10 @@ uint32_t fk_fp_physical_layout(void);
 uint32_t fk_fp_physical_layout_one(const struct zmk_physical_layout *layout);
 
 /** fp for one layer's CURRENT bindings only (no layer_id/name prefix -- the
- * LayerFingerprint message already carries `id` separately). Mutable
- * (changes on keymap edits and active-layout switches) -- always
- * recomputed, never cached. */
+ * LayerFingerprint message already carries `id` separately). Mutable (changes
+ * on keymap edits and active-layout switches). Produced by the shared
+ * dedup/cache walk alongside fk_fp_keymap() (fingerprint.c); a layer the walk
+ * didn't cover falls back to a direct recompute with the identical value. */
 uint32_t fk_fp_layer_current(zmk_keymap_layer_id_t layer_id);
 
 /** fp for one layer's DEFAULT (DT stock) bindings only. Equals
