@@ -93,6 +93,16 @@ in-RAM caching in `src/fingerprint.c`, gated by
 fingerprint is recomputed on each call instead of cached (saving the cache
 RAM) — the reported fp values are byte-identical either way.
 
+The three **mutable** opaque fps (`keymap_fp`, per-layer current `fp`,
+`physical_layout_fp`) are additionally produced by a single shared binding
+walk (`keymap_fp` + every per-layer current `fp` come from one pass, each
+binding fetched once) and, under `CONFIG_ZMK_FAST_KEYMAP_FP_CACHE`, cached
+until a `zmk_studio_rpc_notification` (any Studio keymap mutation) or an
+active-physical-layout switch invalidates them. This is a pure
+computation-sharing/caching change of opaque fps: the VALUES are identical
+with the cache on or off, so it needs **no** `FK_DEFINITION_VERSION` bump (see
+`DESIGN.md` §4 for the dedup + invalidation design and rationale).
+
 Groups reported in `Snapshot`:
 
 | field | canonicalization |
@@ -100,10 +110,10 @@ Groups reported in `Snapshot`:
 | `def_fp` (per behavior; the identity + validator; **web-reproduced**) | metadata bytes + `str16 alias` + `str16 display_name`, using the **as-served** strings (alias = first DT node label, else device name; display_name = metadata display name, else device name). Keys the web's standard-behavior bundle and per-device cache. Immutable per behavior (compile-time metadata/alias/display_name) — firmware memoizes it forever, keyed by the behavior device pointer. |
 | `behaviors_fp` (**opaque**) | per behavior, ascending `local_id`: `u16le local_id` + `u32le def_fp` (that behavior's already-computed `def_fp`, not its raw preimage bytes). Composing from `def_fp` lets the firmware compute each behavior's metadata preimage at most once and reuse it here; the aggregate itself is memoized forever once local_ids settle (after `settings_load`, which precedes any RPC). |
 | `default_keymap_fp` (**opaque**) | per layer (index order): `u8 layer_id` + each binding_idx's canonical binding (stock/default). Depends on the active physical layout under `CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER` (applies its position map) — firmware memoizes it, invalidated on active-layout switch. |
-| `keymap_fp` (**opaque**) | `u8 active_layout_index`, then per layer: `u8 layer_id` + `str16 name` + each binding_idx's canonical binding (current). Mutable (keymap edits, layout switches) — always recomputed, never cached. |
-| `LayerFingerprint.fp` / `.default_fp` (per layer; **opaque**) | that layer's canonical bindings concatenated (current / default); no `layer_id` prefix — the message carries `id` separately. `default_fp` is memoized the same way as `default_keymap_fp`; `fp` (current) is mutable and always recomputed. |
+| `keymap_fp` (**opaque**) | `u8 active_layout_index`, then per layer: `u8 layer_id` + `str16 name` + each binding_idx's canonical binding (current). Mutable (keymap edits, layout switches) — produced by the single shared binding walk and, under the FP cache, held until a Studio RPC notification / layout switch invalidates it (byte-identical value either way). |
+| `LayerFingerprint.fp` / `.default_fp` (per layer; **opaque**) | that layer's canonical bindings concatenated (current / default); no `layer_id` prefix — the message carries `id` separately. `default_fp` is memoized the same way as `default_keymap_fp`; `fp` (current) is produced by the shared mutable-fp walk/cache alongside `keymap_fp`. |
 | per-layout physical `fp` (in `PhysicalLayoutSummary`; **opaque**) | one layout: `str16 name` + `u16le key_count` + per key `i16le width,height,x,y,r,rx,ry` (rotation fields `0` when `CONFIG_ZMK_PHYSICAL_LAYOUT_KEY_ROTATION` is off). The web caches+compares it, never recomputes it. Compile-time constant per layout — memoized forever, keyed by the layout pointer. |
-| `physical_layout_fp` (**opaque**) | `u8 active_layout_index`, then per layout that layout's per-layout-`fp`-preimage (name + keys, as above). Includes the mutable active-layout index, so always recomputed (cheap: few layouts). |
+| `physical_layout_fp` (**opaque**) | `u8 active_layout_index`, then per layout that layout's per-layout-`fp`-preimage (name + keys, as above). Includes the mutable active-layout index, so it rides the shared mutable-fp cache alongside `keymap_fp` (cheap: few layouts). |
 
 > Note the two string encodings: alias/display_name (in `def_fp` /
 > `behaviors_fp`) use `str16`, but value display-names **inside metadata** use

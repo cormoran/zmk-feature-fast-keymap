@@ -14,10 +14,12 @@
 #include <zephyr/sys/util.h>
 
 #include <zmk/behavior.h>
+#include <zmk/event_manager.h>
 #include <zmk/hid.h>
 #include <zmk/keymap.h>
 #include <zmk/matrix.h>
 #include <zmk/physical_layouts.h>
+#include <zmk/studio/rpc.h>
 
 #include "behavior_alias.h"
 
@@ -77,21 +79,37 @@ static uint32_t crc_str_u8len(uint32_t seed, const char *s) {
     return seed;
 }
 
-uint32_t fk_crc_binding(uint32_t seed, const struct zmk_behavior_binding *binding) {
-    int32_t local_id = -1;
-    uint32_t param1 = 0;
-    uint32_t param2 = 0;
+/* Resolve a binding's canonical fields. zmk_behavior_get_local_id() is an O(N)
+ * scan over the behavior table, so callers that need to feed the same binding
+ * into more than one CRC seed (e.g. fk_mutable_populate: whole-keymap + per-layer)
+ * should resolve ONCE with this and CRC the fields into each seed via
+ * fk_crc_binding_fields(), rather than calling fk_crc_binding() twice. */
+static void fk_resolve_binding(const struct zmk_behavior_binding *binding, int32_t *local_id,
+                               uint32_t *param1, uint32_t *param2) {
+    *local_id = -1;
+    *param1 = 0;
+    *param2 = 0;
 
     if (binding && binding->behavior_dev) {
-        local_id = (int32_t)zmk_behavior_get_local_id(binding->behavior_dev);
-        param1 = binding->param1;
-        param2 = binding->param2;
+        *local_id = (int32_t)zmk_behavior_get_local_id(binding->behavior_dev);
+        *param1 = binding->param1;
+        *param2 = binding->param2;
     }
+}
 
+static uint32_t fk_crc_binding_fields(uint32_t seed, int32_t local_id, uint32_t param1,
+                                      uint32_t param2) {
     seed = crc_i32le(seed, local_id);
     seed = crc_u32le(seed, param1);
     seed = crc_u32le(seed, param2);
     return seed;
+}
+
+uint32_t fk_crc_binding(uint32_t seed, const struct zmk_behavior_binding *binding) {
+    int32_t local_id;
+    uint32_t param1, param2;
+    fk_resolve_binding(binding, &local_id, &param1, &param2);
+    return fk_crc_binding_fields(seed, local_id, param1, param2);
 }
 
 uint16_t fk_binding_count(void) {
@@ -477,7 +495,8 @@ static void fk_default_cache_sync_layout(void) {
 #endif
 
 uint32_t fk_fp_default_keymap(void) {
-#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER) && IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER)
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
     fk_default_cache_sync_layout();
     if (fk_default_keymap_fp_valid) {
         return fk_default_keymap_fp_cache;
@@ -493,47 +512,168 @@ uint32_t fk_fp_default_keymap(void) {
         seed = crc_u8(seed, layer_id);
 
         for (uint16_t b = 0; b < binding_count; b++) {
-#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER)
             const struct zmk_behavior_binding *binding =
                 zmk_stock_keymap_get_layer_binding_at_idx(layer_id, b);
-#else
-            const struct zmk_behavior_binding *binding =
-                zmk_keymap_get_layer_binding_at_idx(layer_id, b);
-#endif
             seed = fk_crc_binding(seed, binding);
         }
     }
 
     seed = fk_fp16(seed);
 
-#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER) && IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
     fk_default_keymap_fp_cache = seed;
     fk_default_keymap_fp_valid = true;
 #endif
 
     return seed;
+#else
+    /* No separate stock keymap exists (default == current), so re-walking the
+     * same bindings here would just duplicate fk_fp_keymap()'s walk. Return
+     * the deduped/cached keymap_fp directly -- an opaque cache key, so this
+     * (off-path only) value change is safe and needs no version bump. */
+    return fk_fp_keymap();
+#endif
 }
 
-uint32_t fk_fp_keymap(void) {
+/* -- mutable-keymap fp dedup + cache (keymap_fp / per-layer current fp /
+ *    physical_layout_fp) --
+ *
+ * Part A -- DEDUP. One pass over each layer's CURRENT bindings feeds BOTH the
+ * whole-keymap accumulator (keymap_fp: a single running crc seed across all
+ * layers, with each layer's `u8 layer_id` + `str16 name` interleaved) AND that
+ * layer's own fresh-seed accumulator (its per-layer current fp). Every binding
+ * is fetched from zmk_keymap_get_layer_binding_at_idx() exactly ONCE, so a
+ * get_snapshot walks the current bindings once total instead of ~1+N times
+ * (the fetch, ~19us/binding, dominated the old cost). physical_layout_fp is
+ * produced in the same populate call (a cheap separate walk over the physical-
+ * layout list, not the bindings). The resulting VALUES are byte-identical to
+ * the old per-fp walks -- same CRC inputs in the same order, just fetched once.
+ *
+ * Part B -- CACHE (CONFIG_ZMK_FAST_KEYMAP_FP_CACHE). The populated values
+ * persist across get_snapshot calls, so a warm read (nothing edited since the
+ * last call) is free. These fps are MUTABLE (unlike def_fp/behaviors_fp/the
+ * per-layout fp), so the cache is invalidated (valid=false) on:
+ *   1. any `zmk_studio_rpc_notification` -- ZMK has no granular keymap-changed
+ *      event, but every Studio keymap mutation (set_layer_binding / move / add
+ *      / save / discard) raises `unsaved_changes_status_changed`, delivered as
+ *      one of these notifications. Invalidating on ANY of them is safe for a
+ *      read-only module: worst case is one extra recompute, and during a
+ *      normal load no notifications fire so the cache stays warm. The listener
+ *      only clears the flag (recompute happens lazily on the next read).
+ *   2. an active-physical-layout switch -- checked on every read by comparing
+ *      zmk_physical_layouts_get_selected() to the index the cache was filled
+ *      under. Layout switches change binding positions and do not reliably
+ *      raise a subscribable event, so this is checked directly rather than via
+ *      a notification.
+ *   3. boot / settings-load -- the flag starts false (BSS), so the first
+ *      get_snapshot populates lazily.
+ * No locking: Studio RPCs and this listener share the serialized RPC/event
+ * path, so only one context ever touches the cache.
+ *
+ * The struct is present even when the cache is OFF: it doubles as the Part A
+ * single-walk scratch (keymap_fp + every per-layer current fp have to be
+ * produced from one pass, which needs somewhere to hold the per-layer
+ * results). With the cache OFF there is no invalidation listener, and
+ * handle_get_snapshot() marks the struct invalid at the top of each snapshot
+ * (see fast_keymap_handler.c) so every snapshot recomputes exactly once --
+ * identical values, no cross-call persistence. */
+static uint32_t crc_physical_layout_preimage(uint32_t seed, const struct zmk_physical_layout *l);
+
+struct fk_mutable_fp {
+    bool valid;
+    int selected_layout;
+    uint32_t keymap_fp;
+    uint32_t physical_layout_fp;
+    bool layer_present[ZMK_KEYMAP_LAYERS_LEN];
+    uint32_t layer_current_fp[ZMK_KEYMAP_LAYERS_LEN];
+};
+
+static struct fk_mutable_fp fk_mut;
+
+static uint32_t fk_compute_physical_layout_fp(int selected) {
     uint32_t seed = 0;
-    uint16_t binding_count = fk_binding_count();
-    uint8_t layer_count = fk_layer_count();
+    seed = crc_u8(seed, (uint8_t)selected);
 
-    seed = crc_u8(seed, (uint8_t)zmk_physical_layouts_get_selected());
+    struct zmk_physical_layout const *const *layouts;
+    size_t layout_count = zmk_physical_layouts_get_list(&layouts);
 
-    for (uint8_t idx = 0; idx < layer_count; idx++) {
-        zmk_keymap_layer_id_t layer_id = zmk_keymap_layer_index_to_id(idx);
-        seed = crc_u8(seed, layer_id);
-        seed = crc_str_u16len(seed, zmk_keymap_layer_name(layer_id));
-
-        for (uint16_t b = 0; b < binding_count; b++) {
-            const struct zmk_behavior_binding *binding =
-                zmk_keymap_get_layer_binding_at_idx(layer_id, b);
-            seed = fk_crc_binding(seed, binding);
-        }
+    for (size_t i = 0; i < layout_count; i++) {
+        seed = crc_physical_layout_preimage(seed, layouts[i]);
     }
 
     return fk_fp16(seed);
+}
+
+/* The single shared walk: fills keymap_fp + every present layer's current fp
+ * + physical_layout_fp from one pass over the current bindings. */
+static void fk_mutable_populate(int selected) {
+    uint16_t binding_count = fk_binding_count();
+    uint8_t layer_count = fk_layer_count();
+
+    memset(fk_mut.layer_present, 0, sizeof(fk_mut.layer_present));
+
+    uint32_t keymap_seed = 0;
+    keymap_seed = crc_u8(keymap_seed, (uint8_t)selected);
+
+    for (uint8_t idx = 0; idx < layer_count; idx++) {
+        zmk_keymap_layer_id_t layer_id = zmk_keymap_layer_index_to_id(idx);
+        keymap_seed = crc_u8(keymap_seed, layer_id);
+        keymap_seed = crc_str_u16len(keymap_seed, zmk_keymap_layer_name(layer_id));
+
+        uint32_t layer_seed = 0;
+        for (uint16_t b = 0; b < binding_count; b++) {
+            const struct zmk_behavior_binding *binding =
+                zmk_keymap_get_layer_binding_at_idx(layer_id, b);
+            /* One fetch AND one local_id resolution feed both accumulators
+             * (Part A). Resolving once halves the O(N) behavior-table scan vs
+             * calling fk_crc_binding() twice; the CRC bytes/order are identical
+             * so keymap_fp / per-layer fp values are unchanged. */
+            int32_t local_id;
+            uint32_t param1, param2;
+            fk_resolve_binding(binding, &local_id, &param1, &param2);
+            keymap_seed = fk_crc_binding_fields(keymap_seed, local_id, param1, param2);
+            layer_seed = fk_crc_binding_fields(layer_seed, local_id, param1, param2);
+        }
+
+        if (layer_id < ZMK_KEYMAP_LAYERS_LEN) {
+            fk_mut.layer_current_fp[layer_id] = fk_fp16(layer_seed);
+            fk_mut.layer_present[layer_id] = true;
+        }
+    }
+
+    fk_mut.keymap_fp = fk_fp16(keymap_seed);
+    fk_mut.physical_layout_fp = fk_compute_physical_layout_fp(selected);
+    fk_mut.selected_layout = selected;
+    fk_mut.valid = true;
+}
+
+static void fk_mutable_ensure(void) {
+    int selected = zmk_physical_layouts_get_selected();
+    /* Layout-switch check (invalidation trigger #2) runs in BOTH cache modes. */
+    if (fk_mut.valid && fk_mut.selected_layout == selected) {
+        return;
+    }
+    fk_mutable_populate(selected);
+}
+
+/* Drop the cached mutable fps; recompute lazily on the next read. Wired to the
+ * Studio RPC notification listener (trigger #1) and called by the snapshot
+ * handler when the cache is compiled out. */
+void fk_fp_mutable_invalidate(void) { fk_mut.valid = false; }
+
+#if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_FP_CACHE)
+static int fk_mutable_rpc_notification_cb(const zmk_event_t *eh) {
+    ARG_UNUSED(eh);
+    fk_fp_mutable_invalidate();
+    return ZMK_EV_EVENT_BUBBLE;
+}
+ZMK_LISTENER(fk_mutable_fp, fk_mutable_rpc_notification_cb);
+ZMK_SUBSCRIPTION(fk_mutable_fp, zmk_studio_rpc_notification);
+#endif
+
+uint32_t fk_fp_keymap(void) {
+    fk_mutable_ensure();
+    return fk_mut.keymap_fp;
 }
 
 /* Per-layout physical fp preimage (DESIGN.md SS4/SS6): one layout's `str16
@@ -627,29 +767,26 @@ uint32_t fk_fp_physical_layout_one(const struct zmk_physical_layout *layout) {
 }
 
 uint32_t fk_fp_physical_layout(void) {
-    uint32_t seed = 0;
-    seed = crc_u8(seed, (uint8_t)zmk_physical_layouts_get_selected());
-
-    struct zmk_physical_layout const *const *layouts;
-    size_t layout_count = zmk_physical_layouts_get_list(&layouts);
-
-    for (size_t i = 0; i < layout_count; i++) {
-        seed = crc_physical_layout_preimage(seed, layouts[i]);
-    }
-
-    return fk_fp16(seed);
+    fk_mutable_ensure();
+    return fk_mut.physical_layout_fp;
 }
 
 uint32_t fk_fp_layer_current(zmk_keymap_layer_id_t layer_id) {
+    fk_mutable_ensure();
+    if (layer_id < ZMK_KEYMAP_LAYERS_LEN && fk_mut.layer_present[layer_id]) {
+        return fk_mut.layer_current_fp[layer_id];
+    }
+
+    /* Fallback for a layer the shared walk didn't cover (out-of-range id, or a
+     * slot not currently configured): compute it directly -- the same fresh-
+     * seed walk the populate uses, so the identical value. */
     uint32_t seed = 0;
     uint16_t binding_count = fk_binding_count();
-
     for (uint16_t b = 0; b < binding_count; b++) {
         const struct zmk_behavior_binding *binding =
             zmk_keymap_get_layer_binding_at_idx(layer_id, b);
         seed = fk_crc_binding(seed, binding);
     }
-
     return fk_fp16(seed);
 }
 
