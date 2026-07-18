@@ -681,6 +681,89 @@ static int handle_get_layers(const cormoran_fast_keymap_GetLayersRequest *req,
     return 0;
 }
 
+/* -- get_pending (all layers' unsaved positions) ---------------------- */
+
+static bool fk_binding_is_pending(zmk_keymap_layer_id_t layer_id, uint16_t binding_idx) {
+    return zmk_keymap_layer_binding_at_idx_is_pending(layer_id, binding_idx) == 1;
+}
+
+static bool fk_layer_has_pending(zmk_keymap_layer_id_t layer_id) {
+    uint16_t binding_count = fk_binding_count();
+    for (uint16_t b = 0; b < binding_count; b++) {
+        if (fk_binding_is_pending(layer_id, b)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* One persistent layer id per layer slot, so each PendingLayer submessage's
+ * positions callback reads the right layer across both encode passes (nanopb
+ * keeps the arg pointer, like fk_get_layers_args). */
+static zmk_keymap_layer_id_t fk_pending_layer_ids[ZMK_KEYMAP_LAYERS_LEN];
+
+static bool encode_pending_positions(pb_ostream_t *stream, const pb_field_t *field,
+                                     void *const *arg) {
+    zmk_keymap_layer_id_t layer_id = *(zmk_keymap_layer_id_t *)*arg;
+    uint16_t binding_count = fk_binding_count();
+
+    for (uint16_t b = 0; b < binding_count; b++) {
+        if (!fk_binding_is_pending(layer_id, b)) {
+            continue;
+        }
+
+        /* Unpacked repeated uint32 (tag per element): valid proto3, decoders
+         * accept it as well as the packed form. */
+        if (!pb_encode_tag_for_field(stream, field)) {
+            return false;
+        }
+        if (!pb_encode_varint(stream, b)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool encode_pending_layers(pb_ostream_t *stream, const pb_field_t *field, void *const *arg) {
+    ARG_UNUSED(arg);
+    uint8_t layer_count = fk_layer_count();
+
+    for (uint8_t idx = 0; idx < layer_count && idx < ARRAY_SIZE(fk_pending_layer_ids); idx++) {
+        zmk_keymap_layer_id_t id = zmk_keymap_layer_index_to_id(idx);
+
+        if (!fk_layer_has_pending(id)) {
+            continue;
+        }
+
+        if (!pb_encode_tag_for_field(stream, field)) {
+            return false;
+        }
+
+        fk_pending_layer_ids[idx] = id;
+
+        cormoran_fast_keymap_PendingLayer pl = cormoran_fast_keymap_PendingLayer_init_zero;
+        pl.id = id;
+        pl.positions.funcs.encode = encode_pending_positions;
+        pl.positions.arg = &fk_pending_layer_ids[idx];
+
+        if (!pb_encode_submessage(stream, &cormoran_fast_keymap_PendingLayer_msg, &pl)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static int handle_get_pending(cormoran_fast_keymap_Response *resp) {
+    cormoran_fast_keymap_PendingResponse *out = &resp->response_type.get_pending;
+    *out = (cormoran_fast_keymap_PendingResponse)cormoran_fast_keymap_PendingResponse_init_zero;
+    out->layers.funcs.encode = encode_pending_layers;
+
+    resp->which_response_type = cormoran_fast_keymap_Response_get_pending_tag;
+    return 0;
+}
+
 /* -- get_physical_layouts ------------------------------------------- */
 
 static bool encode_layout_name(pb_ostream_t *stream, const pb_field_t *field, void *const *arg) {
@@ -882,6 +965,9 @@ static bool fast_keymap_rpc_handle_request(const zmk_custom_CallRequest *raw_req
         break;
     case cormoran_fast_keymap_Request_get_layers_tag:
         rc = handle_get_layers(&req.request_type.get_layers, resp);
+        break;
+    case cormoran_fast_keymap_Request_get_pending_tag:
+        rc = handle_get_pending(resp);
         break;
     case cormoran_fast_keymap_Request_get_physical_layouts_tag:
         rc = handle_get_physical_layouts(req.request_type.get_physical_layouts.details, resp);

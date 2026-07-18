@@ -1,10 +1,12 @@
 import {
   BehaviorDetailsMode,
   LayoutDetailsMode,
+  ErrorCode,
   exportKeymapText,
   FastKeymapCacheKeys,
   loadFastKeymap,
   loadPhysicalLayoutGeometry,
+  loadPendingPositions,
   FK_DEFINITION_VERSION,
   STANDARD_BEHAVIORS,
   defFp,
@@ -783,6 +785,55 @@ describe("loadPhysicalLayoutGeometry", () => {
       { width: 100, height: 100, x: 0, y: 0, r: 0, rx: 0, ry: 0 },
       { width: 200, height: 100, x: 100, y: 0, r: 0, rx: 0, ry: 0 },
     ]);
+  });
+});
+
+describe("loadPendingPositions", () => {
+  it("returns per-layer unsaved positions from get_pending", async () => {
+    const requests: Request[] = [];
+    const call: FastKeymapCall = async (request) => {
+      requests.push(request);
+      if (request.getPending) {
+        return {
+          getPending: {
+            layers: [
+              { id: 0, positions: [1, 5] },
+              { id: 2, positions: [3] },
+            ],
+          },
+        };
+      }
+      throw new Error(`unexpected request: ${JSON.stringify(request)}`);
+    };
+
+    const pending = await loadPendingPositions(call);
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0].getPending).toBe(true);
+    expect(pending).toEqual([
+      { id: 0, positions: [1, 5] },
+      { id: 2, positions: [3] },
+    ]);
+  });
+
+  it("returns an empty array when nothing is pending", async () => {
+    const call: FastKeymapCall = async (request) => {
+      if (request.getPending) {
+        return { getPending: { layers: [] } };
+      }
+      throw new Error(`unexpected request: ${JSON.stringify(request)}`);
+    };
+
+    expect(await loadPendingPositions(call)).toEqual([]);
+  });
+
+  it("throws a descriptive error when the device returns an error response", async () => {
+    const call: FastKeymapCall = async () => ({
+      error: { code: ErrorCode.ERR_GENERIC },
+    });
+    await expect(loadPendingPositions(call)).rejects.toThrow(
+      /fast_keymap RPC error/
+    );
   });
 });
 

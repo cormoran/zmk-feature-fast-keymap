@@ -50,9 +50,18 @@ exporter**) is published at
 
 ## Module User Guide
 
-1. Add the module to your `config/west.yml` (uses the standard
-   `main+custom-studio-protocol` ZMK branch — no extra patches needed for the
-   default feature set).
+1. Add the module to your `config/west.yml`. Point the `zmk` project at a branch
+   that carries this module's supporting keymap accessors:
+
+   - **`main+custom-studio-protocol+fast-keymap`** — the recommended minimum:
+     `main+custom-studio-protocol` plus the two non-upstream keymap accessors
+     this module's optional features use (default/edited-layer diff and the
+     `get_pending` unsaved-positions method).
+   - **`main+dya`** — the all-in-one branch (fast-keymap accessors plus the
+     other `dya` extras).
+
+   Plain `main+custom-studio-protocol` still works for the core read-only
+   fast-load; only the two optional features below degrade gracefully on it.
 
    ```yml
    manifest:
@@ -63,10 +72,11 @@ exporter**) is published at
        - name: zmk-feature-fast-keymap
          remote: cormoran
          revision: main
-       # Patched ZMK: the unofficial custom Studio RPC protocol
+       # Patched ZMK: the unofficial custom Studio RPC protocol + this module's
+       # keymap accessors (or use main+dya for the all-in-one branch).
        - name: zmk
          remote: cormoran
-         revision: main+custom-studio-protocol
+         revision: main+custom-studio-protocol+fast-keymap
          import:
            file: app/west.yml
    ```
@@ -92,11 +102,19 @@ exporter**) is published at
    > the compiled-in default keymap and fetch only edited positions) read the
    > default keymap through ZMK's non-upstream
    > `zmk_stock_keymap_get_layer_binding_at_idx()` accessor. They are **off by
-   > default**. To use them, set `CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER=y` **and**
-   > point the `zmk` project at a branch that has the accessor —
-   > `main+dya` or `pr/main+custom-studio-protocol/expose-stock-keymap`. With
-   > the default branch, `get_default_layer` returns the current keymap (no
-   > diff) and everything else works normally.
+   > default**; set `CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER=y` to enable them. The
+   > accessor is present on the recommended `main+custom-studio-protocol+fast-keymap`
+   > (and `main+dya`) branches. On plain `main+custom-studio-protocol`,
+   > `get_default_layer` returns the current keymap (no diff) and everything
+   > else works normally.
+
+   > **Optional — unsaved (pending) positions.** The `get_pending` method
+   > returns, per layer, the positions whose binding has an unsaved,
+   > in-memory-only edit (changed since the last save) so a client can flag
+   > which keys aren't persisted yet. It reads ZMK core's pending state through
+   > the non-upstream `zmk_keymap_layer_binding_at_idx_is_pending()` accessor,
+   > present on `main+custom-studio-protocol+fast-keymap` (and `main+dya`). On a
+   > branch without it, the method reports nothing pending.
 
 3. Flash, open the web app above, connect (USB or BLE), and it fast-loads your
    keymap and behaviors. Use "Export .keymap" to copy a `.keymap`-style dump.
