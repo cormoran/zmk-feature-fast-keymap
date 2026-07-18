@@ -298,6 +298,96 @@ static bool decode_edited_cb(pb_istream_t *stream, const pb_field_t *field, void
     return true;
 }
 
+/* -- get_pending decode helpers (PendingResponse -> per-layer positions) -- */
+
+struct pending_layer_capture {
+    uint32_t id;
+    uint32_t positions[ZMK_KEYMAP_LEN];
+    size_t position_count;
+};
+typedef CAPTURE_ARRAY(struct pending_layer_capture, ZMK_KEYMAP_LAYERS_LEN) pending_capture_t;
+
+/* The firmware encodes positions unpacked (one varint per element, see
+ * encode_pending_positions), so this is invoked once per position. */
+static bool decode_pending_positions_cb(pb_istream_t *stream, const pb_field_t *field, void **arg) {
+    ARG_UNUSED(field);
+    struct pending_layer_capture *cap = *arg;
+    uint32_t val;
+    if (!pb_decode_varint32(stream, &val)) {
+        return false;
+    }
+    if (cap->position_count < ARRAY_SIZE(cap->positions)) {
+        cap->positions[cap->position_count++] = val;
+    }
+    return true;
+}
+
+static bool decode_pending_layers_cb(pb_istream_t *stream, const pb_field_t *field, void **arg) {
+    ARG_UNUSED(field);
+    pending_capture_t *cap = *arg;
+    if (cap->count >= ARRAY_SIZE(cap->entries)) {
+        LOG_ERR("too many pending layers for test capture");
+        return false;
+    }
+
+    struct pending_layer_capture *slot = &cap->entries[cap->count];
+    *slot = (struct pending_layer_capture){0};
+
+    cormoran_fast_keymap_PendingLayer pl = cormoran_fast_keymap_PendingLayer_init_zero;
+    pl.positions.funcs.decode = decode_pending_positions_cb;
+    pl.positions.arg = slot;
+    if (!pb_decode(stream, cormoran_fast_keymap_PendingLayer_fields, &pl)) {
+        return false;
+    }
+    slot->id = pl.id;
+    cap->count++;
+    return true;
+}
+
+static const struct pending_layer_capture *find_pending_layer(const pending_capture_t *cap,
+                                                              uint32_t layer_id) {
+    for (size_t i = 0; i < cap->count; i++) {
+        if (cap->entries[i].id == layer_id) {
+            return &cap->entries[i];
+        }
+    }
+    return NULL;
+}
+
+static bool pending_layer_has_position(const struct pending_layer_capture *l, uint32_t position) {
+    if (!l) {
+        return false;
+    }
+    for (size_t i = 0; i < l->position_count; i++) {
+        if (l->positions[i] == position) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool call_get_pending(pending_capture_t *out) {
+    cormoran_fast_keymap_Request req = cormoran_fast_keymap_Request_init_zero;
+    req.which_request_type = cormoran_fast_keymap_Request_get_pending_tag;
+    req.request_type.get_pending = true;
+
+    *out = (pending_capture_t){0};
+    cormoran_fast_keymap_Response resp = cormoran_fast_keymap_Response_init_zero;
+    resp.which_response_type = cormoran_fast_keymap_Response_get_pending_tag;
+    resp.response_type.get_pending =
+        (cormoran_fast_keymap_PendingResponse)cormoran_fast_keymap_PendingResponse_init_zero;
+    resp.response_type.get_pending.layers.funcs.decode = decode_pending_layers_cb;
+    resp.response_type.get_pending.layers.arg = out;
+    if (!call_fast_keymap_rpc(&req, &resp)) {
+        return false;
+    }
+    if (resp.which_response_type != cormoran_fast_keymap_Response_get_pending_tag) {
+        LOG_ERR("get_pending unexpected response type %d", resp.which_response_type);
+        return false;
+    }
+    return true;
+}
+
 /* -- BehaviorDetails decode helpers (alias/display_name/metadata) --
  *
  * Small bounded captures (this module's test keymap only has a handful of
@@ -1895,6 +1985,65 @@ static int test_edited_diff_and_default(void) {
 #endif /* CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER */
 }
 
+/* get_pending: an in-memory-only edit (never saved) must be reported as a
+ * pending position on its layer. Runs after the read-only tests since it
+ * mutates the runtime keymap. */
+static int test_get_pending(void) {
+#if !IS_ENABLED(CONFIG_ZMK_KEYMAP_SETTINGS_STORAGE)
+    LOG_INF("PASS: fast_keymap_get_pending (skipped: no keymap settings storage)");
+    return 0;
+#else
+    const uint32_t edit_layer = 0;
+    const uint32_t edit_pos = 1;
+
+    /* Baseline: whatever is already pending (earlier tests may have left other
+     * positions edited). The freshly-edited position must not already be in it. */
+    pending_capture_t before = {0};
+    if (!call_get_pending(&before)) {
+        return -EINVAL;
+    }
+    const struct pending_layer_capture *before_l = find_pending_layer(&before, edit_layer);
+    size_t before_count = before_l ? before_l->position_count : 0;
+    if (pending_layer_has_position(before_l, edit_pos)) {
+        LOG_ERR("get_pending: position %u already pending before edit", (unsigned int)edit_pos);
+        return -EINVAL;
+    }
+
+    /* Make an in-memory-only edit (never persisted) through the ZMK core keymap
+     * API -- exactly what a real Studio edit calls -- so its pending bit is set. */
+    struct zmk_behavior_binding new_binding = {
+        .behavior_dev = "key_press",
+        .param1 = 0xABCD,
+        .param2 = 0,
+    };
+    int ret = zmk_keymap_set_layer_binding_at_idx(edit_layer, edit_pos, new_binding);
+    if (ret < 0) {
+        LOG_ERR("get_pending: set_layer_binding_at_idx failed: %d", ret);
+        return -EINVAL;
+    }
+
+    /* After: the edited position must now be reported pending on its layer, and
+     * exactly one position must have been added versus the baseline. */
+    pending_capture_t after = {0};
+    if (!call_get_pending(&after)) {
+        return -EINVAL;
+    }
+    const struct pending_layer_capture *after_l = find_pending_layer(&after, edit_layer);
+    if (!pending_layer_has_position(after_l, edit_pos)) {
+        LOG_ERR("get_pending: edited position %u not reported pending", (unsigned int)edit_pos);
+        return -EINVAL;
+    }
+    if (!after_l || after_l->position_count != before_count + 1) {
+        LOG_ERR("get_pending: expected exactly one added pending position (before=%u after=%u)",
+                (unsigned int)before_count, (unsigned int)(after_l ? after_l->position_count : 0));
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: fast_keymap_get_pending");
+    return 0;
+#endif /* CONFIG_ZMK_KEYMAP_SETTINGS_STORAGE */
+}
+
 static int test_invalid_requests(void) {
     cormoran_fast_keymap_Request bad_layer = cormoran_fast_keymap_Request_init_zero;
     bad_layer.which_request_type = cormoran_fast_keymap_Request_get_layer_tag;
@@ -2015,6 +2164,11 @@ static int fast_keymap_rpc_test_init(void) {
     }
 
     ret = test_edited_diff_and_default();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_get_pending();
     if (ret < 0) {
         return ret;
     }

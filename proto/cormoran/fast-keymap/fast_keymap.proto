@@ -22,6 +22,7 @@ message Request {
         GetPhysicalLayoutsRequest get_physical_layouts = 7; // slim summary (+ optional geometry)
         GetPhysicalLayoutRequest get_physical_layout = 8;   // one layout's geometry
         GetLayersRequest get_layers = 9;                    // batch current/effective (cold load)
+        bool get_pending = 10; // all layers' unsaved (pending) positions
     }
 }
 
@@ -37,6 +38,7 @@ message Response {
         PhysicalLayoutsResponse get_physical_layouts = 8;
         PhysicalLayoutResponse get_physical_layout = 9;
         GetLayersResponse get_layers = 10;
+        PendingResponse get_pending = 11;
     }
 }
 
@@ -47,9 +49,7 @@ message GetLayerRequest { uint32 layer_id = 1; }
 // get_layer per layer is more round-trips than the whole keymap needs -- this
 // collapses them. Unknown/invalid ids are skipped (like get_behaviors), not an
 // error. `layer_ids` is bounded (max_count:32, fits the RX buffer); chunk more.
-message GetLayersRequest {
-    repeated uint32 layer_ids = 1;
-}
+message GetLayersRequest { repeated uint32 layer_ids = 1; }
 
 message GetLayersResponse { repeated Layer layers = 1; }
 
@@ -140,9 +140,9 @@ message BehaviorDetails {
 // Miss-repair batch fetch (SS5): resolve exactly the behaviors the client
 // couldn't resolve from its bundle/cache, in one round-trip.
 message GetBehaviorsRequest {
-    repeated uint32 behavior_ids = 1;   // .options: max_count:32 (fits RX buf)
-    bool include_alias = 2;             // see ListBehaviorsRequest.include_alias
-    bool exclude_display_name = 3;      // see ListBehaviorsRequest.exclude_display_name
+    repeated uint32 behavior_ids = 1; // .options: max_count:32 (fits RX buf)
+    bool include_alias = 2;           // see ListBehaviorsRequest.include_alias
+    bool exclude_display_name = 3;    // see ListBehaviorsRequest.exclude_display_name
 }
 
 message GetBehaviorsResponse { repeated BehaviorEntry behaviors = 1; }
@@ -209,6 +209,19 @@ message EditedLayer {
     uint32 id = 1;
     repeated EditedBinding bindings = 2;
 }
+
+// Positions (in the selected physical layout's binding order) whose binding has
+// an unsaved, in-memory-only edit -- changed since the last save, i.e. ZMK
+// core's pending bit (zmk_keymap_layer_binding_at_idx_is_pending). This reports
+// only WHICH keys are unsaved, not their values: the client already holds the
+// current bindings from get_layers/get_layer. Only layers with at least one
+// pending position are included (a fully-saved keymap yields an empty list).
+message PendingLayer {
+    uint32 id = 1;
+    repeated uint32 positions = 2;
+}
+
+message PendingResponse { repeated PendingLayer layers = 1; }
 
 // enum LayoutDetailsMode -- see DESIGN.md SS6 for the semantics of each mode.
 enum LayoutDetailsMode {

@@ -9,3 +9,4 @@ PASS: fast_keymap_physical_layouts
 PASS: fast_keymap_invalid_requests
 PASS: fast_keymap_dedup_and_cache_values
 PASS: fast_keymap_edited_diff_and_default
+PASS: fast_keymap_get_pending

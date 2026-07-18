@@ -98,6 +98,14 @@ exporter**) is published at
    > the default branch, `get_default_layer` returns the current keymap (no
    > diff) and everything else works normally.
 
+   > **Optional — unsaved (pending) positions.** The `get_pending` method
+   > returns, per layer, the positions whose binding has an unsaved,
+   > in-memory-only edit (changed since the last save) so a client can flag
+   > which keys aren't persisted yet. It reads ZMK core's pending state through
+   > the non-upstream `zmk_keymap_layer_binding_at_idx_is_pending()` accessor
+   > (cormoran/zmk PR #30). Point the `zmk` project at a branch that has it; on
+   > a branch without it the method reports nothing pending.
+
 3. Flash, open the web app above, connect (USB or BLE), and it fast-loads your
    keymap and behaviors. Use "Export .keymap" to copy a `.keymap`-style dump.
 
