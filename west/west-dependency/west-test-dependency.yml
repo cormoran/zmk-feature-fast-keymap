@@ -8,15 +8,13 @@ manifest:
   projects:
     - name: zmk
       remote: cormoran
-      # TEST-ONLY revision. Consumers use plain main+custom-studio-protocol by
-      # default (see README). The tests enable CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER,
-      # which needs the non-upstream zmk_stock_keymap_get_layer_binding_at_idx()
-      # accessor; the get_pending RPC additionally needs
-      # zmk_keymap_layer_binding_at_idx_is_pending() (cormoran/zmk PR #30). This
-      # branch is expose-stock-keymap + that accessor cherry-picked on top.
-      # TODO: re-pin to expose-stock-keymap (or main+custom-studio-protocol) once
-      # PR #30 merges and the stock-keymap branch rebases onto it.
-      revision: claude/expose-stock-keymap+unsaved
+      # TEST-ONLY revision. The tests enable CONFIG_ZMK_FAST_KEYMAP_DEFAULT_LAYER
+      # (needs the non-upstream zmk_stock_keymap_get_layer_binding_at_idx()
+      # accessor) and exercise the get_pending RPC (needs
+      # zmk_keymap_layer_binding_at_idx_is_pending()). This branch carries both
+      # on top of main+custom-studio-protocol and is the minimum branch a
+      # consumer of this module needs (see README).
+      revision: main+custom-studio-protocol+fast-keymap
       import:
         file: app/west.yml
       clone-depth: 1
