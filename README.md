@@ -3,14 +3,14 @@
 ![ZMK Version](https://img.shields.io/badge/ZMK-master-blue)
 [![Test](https://github.com/cormoran/zmk-feature-fast-keymap/actions/workflows/zmk-module.yml/badge.svg?branch=main)](https://github.com/cormoran/zmk-feature-fast-keymap/actions/workflows/zmk-module.yml) [![Devcontainer](https://github.com/cormoran/zmk-feature-fast-keymap/actions/workflows/devcontainer.yml/badge.svg?branch=main)](https://github.com/cormoran/zmk-feature-fast-keymap/actions/workflows/devcontainer.yml)
 
-A **read-only** ZMK [Studio](https://zmk.dev/docs/features/studio) module that
+A ZMK [Studio](https://zmk.dev/docs/features/studio) module that
 serves your keyboard's behavior list and keymap over a custom
 ([unofficial](https://github.com/cormoran/zmk)) Studio RPC subsystem, built to
 **load fast over slow BLE**. It is a cache-friendly companion to ZMK's official
 `keymap`/`behaviors` subsystems, plus a couple of export-oriented extras.
 
-It does not change how your keyboard works and it never writes to your keymap —
-it only reads it (e.g. to display or to export a `.keymap` file).
+It does not change how your keyboard works or write key bindings. It reads the
+keymap for display/export and can store a short identifier for its type.
 
 ## Why it's fast
 
@@ -119,10 +119,30 @@ exporter**) is published at
 3. Flash, open the web app above, connect (USB or BLE), and it fast-loads your
    keymap and behaviors. Use "Export .keymap" to copy a `.keymap`-style dump.
 
+### Keymap identifier RPC
+
+`get_keymap_identifier` reads a keymap type identifier; an empty string means
+unset. `set_keymap_identifier` stores it across reboot, and an empty string
+clears it. Changing bindings does not change the identifier. The setter
+requires ZMK Studio to be unlocked and a working Zephyr settings backend
+(such as the NVS backend used on physical boards). The native simulator's
+`SETTINGS_NONE` backend cannot save it.
+
+Choose a source string for the keymap **type**, such as `abyss:<type>`. Use its
+exact UTF-8 bytes as SHA-256 input, take the first three digest bytes, and
+encode them as four unpadded Base64url characters. The client package exports
+`hashKeymapIdentifier()`, `getKeymapIdentifier()`, and
+`setKeymapIdentifier()` for this flow. Keep the original source string in the
+import/export data: it cannot be recovered from the four-character hash.
+
+Four Base64url characters carry only 24 bits. Among 1,000 different source
+strings, the chance of at least one collision is about 3%; importers should
+check the original source string when available before trusting a match.
+
 ### Limitations
 
-- Read-only: editing/saving stays with ZMK's official `keymap` subsystem. This
-  module coexists with it.
+- Binding editing/saving stays with ZMK's official `keymap` subsystem. This
+  module coexists with it; its only write is the separate type identifier.
 - `.keymap` export renders binding parameters as raw numbers (e.g. `&kp 4`), not
   keycode names — enough to reconstruct structure, not a pretty-printer.
 - Standard-behavior aliases/metadata are authoritative in the web bundle;

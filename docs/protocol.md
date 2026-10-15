@@ -12,6 +12,12 @@ it safely.
 
 ## Fingerprints
 
+The four-character keymap identifier is separate from these fingerprints. It
+is SHA-256 of a client-chosen UTF-8 source string, truncated to the first three
+digest bytes and encoded as unpadded Base64url. It identifies the keymap type
+and stays unchanged when bindings change. See the README for get/set semantics
+and collision risk.
+
 CRC32 (IEEE 802.3 / zlib, reflected polynomial `0xEDB88320`, seed `0`,
 `~crc` in and out). Computed with `crc32_ieee_update()` on-device and a matching
 table implementation in the web app. Fingerprints are **internal hashing
