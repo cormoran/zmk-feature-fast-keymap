@@ -99,6 +99,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -239,6 +240,43 @@ class RenodeTemplateModuleTests(unittest.TestCase):
         )
         # zmk.meta.ErrorConditions.RPC_NOT_FOUND == 2
         self.assertEqual(resp.request_response.meta.simple_error, 2)
+
+    def test_custom_rpc_get_keymap_identifier(self):
+        """A fresh firmware reports an unset identifier through the real RPC path."""
+        inner_req = self.fast_keymap_pb2.Request()
+        inner_req.get_keymap_identifier = True
+        self._send_call(KNOWN_SUBSYSTEM_INDEX, inner_req.SerializeToString())
+
+        resp_bytes = self.rpc.read_frame(timeout=10.0)
+        self.assertIsNotNone(resp_bytes, "no response to get_keymap_identifier")
+        resp = self.studio_pb2.Response()
+        resp.ParseFromString(resp_bytes)
+        self.assertEqual(resp.request_response.WhichOneof("subsystem"), "custom")
+        outer = resp.request_response.custom.call
+        self.assertEqual(outer.subsystem_index, KNOWN_SUBSYSTEM_INDEX)
+        inner = self.fast_keymap_pb2.Response()
+        inner.ParseFromString(outer.payload)
+        self.assertEqual(inner.WhichOneof("response_type"), "keymap_identifier")
+        self.assertEqual(inner.keymap_identifier.identifier, "")
+
+    def test_custom_rpc_set_keymap_identifier_storage_unavailable(self):
+        """The Renode NVS backend rejects a write rather than acknowledging it."""
+        # ZMK prints the boot banner before settings_subsys_init()/settings_load().
+        # Let main finish settings startup before the first write request.
+        time.sleep(1)
+        inner_req = self.fast_keymap_pb2.Request()
+        inner_req.set_keymap_identifier.identifier = "A0-_"
+        self._send_call(KNOWN_SUBSYSTEM_INDEX, inner_req.SerializeToString())
+
+        resp_bytes = self.rpc.read_frame(timeout=10.0)
+        self.assertIsNotNone(resp_bytes, "no response to set_keymap_identifier")
+        resp = self.studio_pb2.Response()
+        resp.ParseFromString(resp_bytes)
+        self.assertEqual(resp.request_response.WhichOneof("subsystem"), "custom")
+        inner = self.fast_keymap_pb2.Response()
+        inner.ParseFromString(resp.request_response.custom.call.payload)
+        self.assertEqual(inner.WhichOneof("response_type"), "error")
+        self.assertEqual(inner.error.code, self.fast_keymap_pb2.ERR_GENERIC)
 
     # -- Known Renode limitation: documented, asserted, not silently skipped --
 

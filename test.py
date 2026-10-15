@@ -41,7 +41,9 @@ class WestCommandsTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.WEST_TOPDIR = Path(run_west(["topdir"]).stdout.strip())
-        cls.BUILD_DIR = cls.WEST_TOPDIR / "build"
+        # Shared West profiles host several module worktrees. Keep artifacts
+        # with this checkout so one worktree cannot overwrite another's tests.
+        cls.BUILD_DIR = THIS_DIR / "build"
 
     @unittest.skipUnless(
         platform.system() == "Linux", "zmk-test is only supported on Linux"
@@ -112,6 +114,7 @@ class WestCommandsTests(unittest.TestCase):
                         "CONFIG_ZMK_FAST_KEYMAP=y",
                         "CONFIG_ZMK_FAST_KEYMAP_STUDIO_RPC=y",
                         "CONFIG_ZMK_RENODE_STUDIO_UART_TRANSPORT=y",
+                        "# CONFIG_ZMK_STUDIO_LOCKING is not set",
                         "# CONFIG_ZMK_STUDIO_TRANSPORT_UART is not set",
                         "# CONFIG_ZMK_USB is not set",
                     ],
@@ -127,7 +130,9 @@ class WestCommandsTests(unittest.TestCase):
         for artifact in artifacts_and_expected_build_params.keys():
             shutil.rmtree(self.BUILD_DIR / artifact, ignore_errors=True)
 
-        result = run_west(["zmk-build", "tests/zmk-config", "-q"])
+        result = run_west(
+            ["zmk-build", "tests/zmk-config", "-d", str(self.BUILD_DIR), "-q"]
+        )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
         for artifact, entries in artifacts_and_expected_build_params.items():

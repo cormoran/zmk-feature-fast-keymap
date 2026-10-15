@@ -36,6 +36,9 @@ include:
   - artifact: renode_smoke_test
     board: xiao_ble//zmk
     shield: tester_xiao
-    cmake-args: -DCONFIG_ZMK_STUDIO=y -DCONFIG_ZMK_FAST_KEYMAP=y -DCONFIG_ZMK_FAST_KEYMAP_STUDIO_RPC=y
+    # Avoid the physical unlock gesture in emulation so the set RPC can be
+    # exercised against the real NVS settings backend. Native_sim covers the
+    # locked-session rejection separately.
+    cmake-args: -DCONFIG_ZMK_STUDIO=y -DCONFIG_ZMK_STUDIO_LOCKING=n -DCONFIG_ZMK_FAST_KEYMAP=y -DCONFIG_ZMK_FAST_KEYMAP_STUDIO_RPC=y
     snippets:
       - renode-studio-uart

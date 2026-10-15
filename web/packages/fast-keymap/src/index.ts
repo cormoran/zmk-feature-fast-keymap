@@ -35,6 +35,12 @@ export {
 
 export { crc32Update, crcStrU16len, defFp, maskDefFp } from "./fingerprint";
 
+export {
+  hashKeymapIdentifier,
+  getKeymapIdentifier,
+  setKeymapIdentifier,
+} from "./keymapIdentifier";
+
 export type {
   ErrorResponse,
   Snapshot,
@@ -65,6 +71,9 @@ export type {
   PhysicalLayoutResponse,
   PhysicalLayoutSummary,
   KeyPhysicalAttrs,
+  SetKeymapIdentifierRequest,
+  KeymapIdentifierResponse,
+  SetKeymapIdentifierResponse,
 } from "./proto/cormoran/fast-keymap/fast_keymap";
 
 export {
