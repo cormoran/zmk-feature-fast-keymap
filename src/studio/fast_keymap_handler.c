@@ -17,20 +17,20 @@
 #include <zmk/hid.h>
 #include <zmk/keymap.h>
 #include <zmk/physical_layouts.h>
+#include <zmk/studio/core.h>
 
 #include "../behavior_alias.h"
 #include "../fingerprint.h"
+#include "../keymap_identifier.h"
 
 #include <zephyr/logging/log.h>
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 static struct zmk_rpc_custom_subsystem_meta fast_keymap_subsystem_meta = {
     ZMK_RPC_CUSTOM_SUBSYSTEM_UI_URLS("https://cormoran.github.io/zmk-feature-fast-keymap/"),
-    // Read-only data (behavior list + keymap); reading it isn't sensitive
-    // and unsecured keeps the fast-load path fast -- no unlock round-trip.
-    // The web template already implements the unlock prompt/retry flow (see
-    // web/src/App.tsx), so switching this to ZMK_STUDIO_RPC_HANDLER_SECURED
-    // requires no web changes.
+    // Keymap/behavior reads stay available without an unlock round-trip.
+    // The sole mutation (set_keymap_identifier) checks Studio's lock state
+    // inside the handler before writing settings.
     .security = ZMK_STUDIO_RPC_HANDLER_UNSECURED,
 };
 
@@ -42,6 +42,41 @@ ZMK_RPC_CUSTOM_SUBSYSTEM_RESPONSE_BUFFER(cormoran__fast_keymap, cormoran_fast_ke
 static void set_error(cormoran_fast_keymap_Response *resp, cormoran_fast_keymap_ErrorCode code) {
     resp->which_response_type = cormoran_fast_keymap_Response_error_tag;
     resp->response_type.error = (cormoran_fast_keymap_ErrorResponse){.code = code};
+}
+
+static bool encode_keymap_identifier(pb_ostream_t *stream, const pb_field_t *field,
+                                     void *const *arg) {
+    const char *identifier = (const char *)*arg;
+    if (!pb_encode_tag_for_field(stream, field)) {
+        return false;
+    }
+    return pb_encode_string(stream, (const pb_byte_t *)identifier, strlen(identifier));
+}
+
+static int handle_get_keymap_identifier(cormoran_fast_keymap_Response *resp) {
+    resp->which_response_type = cormoran_fast_keymap_Response_keymap_identifier_tag;
+    resp->response_type.keymap_identifier.identifier.funcs.encode = encode_keymap_identifier;
+    resp->response_type.keymap_identifier.identifier.arg = (void *)fk_keymap_identifier_get();
+    return 0;
+}
+
+static int handle_set_keymap_identifier(const char *identifier,
+                                        cormoran_fast_keymap_Response *resp) {
+    if (zmk_studio_core_get_lock_state() != ZMK_STUDIO_CORE_LOCK_STATE_UNLOCKED) {
+        set_error(resp, cormoran_fast_keymap_ErrorCode_ERR_UNLOCK_REQUIRED);
+        return 0;
+    }
+    int err = fk_keymap_identifier_set(identifier);
+    if (err == -EINVAL) {
+        set_error(resp, cormoran_fast_keymap_ErrorCode_ERR_INVALID_IDENTIFIER);
+        return 0;
+    }
+    if (err != 0) {
+        LOG_ERR("keymap identifier save failed: %d", err);
+        return err;
+    }
+    resp->which_response_type = cormoran_fast_keymap_Response_set_keymap_identifier_tag;
+    return 0;
 }
 
 /* -- get_snapshot ---------------------------------------------------- */
@@ -968,6 +1003,12 @@ static bool fast_keymap_rpc_handle_request(const zmk_custom_CallRequest *raw_req
         break;
     case cormoran_fast_keymap_Request_get_pending_tag:
         rc = handle_get_pending(resp);
+        break;
+    case cormoran_fast_keymap_Request_get_keymap_identifier_tag:
+        rc = handle_get_keymap_identifier(resp);
+        break;
+    case cormoran_fast_keymap_Request_set_keymap_identifier_tag:
+        rc = handle_set_keymap_identifier(req.request_type.set_keymap_identifier.identifier, resp);
         break;
     case cormoran_fast_keymap_Request_get_physical_layouts_tag:
         rc = handle_get_physical_layouts(req.request_type.get_physical_layouts.details, resp);

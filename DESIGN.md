@@ -1,6 +1,6 @@
 # zmk-feature-fast-keymap — Design
 
-A **read-only** ZMK Studio custom-RPC subsystem that serves the behavior list
+A primarily read-only ZMK Studio custom-RPC subsystem that serves the behavior list
 and keymap data, optimized to load **fast over slow BLE**. It is a faster,
 cache-friendly alternative to ZMK's official `behaviors` + `keymap`
 subsystems, plus a few export-oriented extensions.
@@ -12,13 +12,14 @@ phase order in §9. Read `skills/zmk-module-design/SKILL.md` and
 ## 1. Scope
 
 - **Feature**, not a driver. No `dts/`, no `boards/`, no hardware nodes.
-- **Read-only.** No keymap editing, no persistence, no
-  `zmk-feature-custom-settings` dependency (drop it from this module).
+- **Bindings are read-only.** A four-character keymap type identifier is the
+  only persisted value. It uses Zephyr settings directly, so there is no
+  `zmk-feature-custom-settings` dependency.
 - Subsystem identifier (C token + web string): **`cormoran__fast_keymap`**.
 - Security: **`ZMK_STUDIO_RPC_HANDLER_UNSECURED`** (same as the official
   `list_all_behaviors`; reading a keymap is not sensitive and unsecured keeps
-  load fast — no unlock round-trip). The web template already handles the
-  unlock flow if we ever change this.
+  load fast — no unlock round-trip). The identifier setter checks the Studio
+  lock state itself and requires unlock.
 - Out of scope: writing bindings, adding/removing/moving layers, saving,
   layer name editing, sensor bindings (v1 ignores `sensor_bindings`).
 
@@ -223,7 +224,7 @@ fixes both:
 - **Invalidated cache (`CONFIG_ZMK_FAST_KEYMAP_FP_CACHE`).** The populated
   values persist across calls, so a warm `get_snapshot` (nothing edited since
   the last one) is free. Because the fps are mutable, the cache is invalidated
-  (recomputed lazily on the next read) by three robust-for-a-read-only-module
+  (recomputed lazily on the next read) by three robust-for-read-only-keymap
   triggers:
   1. **Any `zmk_studio_rpc_notification`.** ZMK has no granular
      keymap-changed event, but every Studio keymap mutation

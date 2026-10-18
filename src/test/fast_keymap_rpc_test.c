@@ -26,12 +26,70 @@
 #include <zmk/matrix.h>
 #include <zmk/physical_layouts.h>
 #include <zmk/studio/rpc.h>
+#include <zmk/studio/core.h>
 
 #include "../fingerprint.h"
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 #if IS_ENABLED(CONFIG_ZMK_FAST_KEYMAP_STUDIO_RPC_TEST)
+
+#if IS_ENABLED(CONFIG_SETTINGS_CUSTOM)
+/* Native simulator has no flash. This settings backend keeps values in RAM so
+ * the RPC test can exercise save, reload, and delete through Zephyr settings. */
+static struct {
+    struct settings_store store;
+    char value[4];
+    size_t len;
+    bool present;
+} identifier_test_store;
+
+static ssize_t identifier_test_read(void *arg, void *data, size_t len) {
+    ARG_UNUSED(arg);
+    memcpy(data, identifier_test_store.value, len);
+    return len;
+}
+
+static int identifier_test_load(struct settings_store *store, const struct settings_load_arg *arg) {
+    ARG_UNUSED(store);
+    if (!identifier_test_store.present) {
+        return 0;
+    }
+    return settings_call_set_handler("fast_keymap/identifier", identifier_test_store.len,
+                                     identifier_test_read, NULL, arg);
+}
+
+static int identifier_test_save(struct settings_store *store, const char *name, const char *value,
+                                size_t len) {
+    ARG_UNUSED(store);
+    if (strcmp(name, "fast_keymap/identifier") != 0) {
+        return 0;
+    }
+    if (len == 0) {
+        identifier_test_store.present = false;
+        return 0;
+    }
+    if (len > sizeof(identifier_test_store.value)) {
+        return -EINVAL;
+    }
+    memcpy(identifier_test_store.value, value, len);
+    identifier_test_store.len = len;
+    identifier_test_store.present = true;
+    return 0;
+}
+
+static const struct settings_store_itf identifier_test_store_itf = {
+    .csi_load = identifier_test_load,
+    .csi_save = identifier_test_save,
+};
+
+int settings_backend_init(void) {
+    identifier_test_store.store.cs_itf = &identifier_test_store_itf;
+    settings_src_register(&identifier_test_store.store);
+    settings_dst_register(&identifier_test_store.store);
+    return 0;
+}
+#endif
 
 /*
  * Drives the registered cormoran__fast_keymap RPC handler directly (no
@@ -2094,6 +2152,107 @@ static int test_invalid_requests(void) {
     return 0;
 }
 
+static bool call_get_keymap_identifier(struct str_capture *capture) {
+    cormoran_fast_keymap_Request req = cormoran_fast_keymap_Request_init_zero;
+    req.which_request_type = cormoran_fast_keymap_Request_get_keymap_identifier_tag;
+    req.request_type.get_keymap_identifier = true;
+
+    cormoran_fast_keymap_Response resp = cormoran_fast_keymap_Response_init_zero;
+    resp.which_response_type = cormoran_fast_keymap_Response_keymap_identifier_tag;
+    resp.response_type.keymap_identifier.identifier.funcs.decode = decode_str_cb;
+    resp.response_type.keymap_identifier.identifier.arg = capture;
+    return call_fast_keymap_rpc(&req, &resp) &&
+           resp.which_response_type == cormoran_fast_keymap_Response_keymap_identifier_tag;
+}
+
+static bool call_set_keymap_identifier(const char *identifier,
+                                       cormoran_fast_keymap_Response *resp) {
+    cormoran_fast_keymap_Request req = cormoran_fast_keymap_Request_init_zero;
+    req.which_request_type = cormoran_fast_keymap_Request_set_keymap_identifier_tag;
+    strncpy(req.request_type.set_keymap_identifier.identifier, identifier,
+            sizeof(req.request_type.set_keymap_identifier.identifier) - 1);
+    return call_fast_keymap_rpc(&req, resp);
+}
+
+static int test_keymap_identifier(void) {
+#if !IS_ENABLED(CONFIG_SETTINGS)
+    LOG_INF("PASS: fast_keymap_identifier (skipped: settings unavailable)");
+    return 0;
+#else
+    const char *valid = "A0-_";
+    struct str_capture capture = {0};
+    cormoran_fast_keymap_Response resp = cormoran_fast_keymap_Response_init_zero;
+
+    if (!call_get_keymap_identifier(&capture) || capture.buf[0] != '\0') {
+        LOG_ERR("get_keymap_identifier should initially be unset");
+        return -EINVAL;
+    }
+
+    zmk_studio_core_lock();
+    if (!call_set_keymap_identifier(valid, &resp) ||
+        resp.which_response_type != cormoran_fast_keymap_Response_error_tag ||
+        resp.response_type.error.code != cormoran_fast_keymap_ErrorCode_ERR_UNLOCK_REQUIRED) {
+        LOG_ERR("set_keymap_identifier should require Studio unlock");
+        return -EINVAL;
+    }
+    zmk_studio_core_unlock();
+
+    resp = (cormoran_fast_keymap_Response)cormoran_fast_keymap_Response_init_zero;
+    if (!call_set_keymap_identifier("ab+c", &resp) ||
+        resp.which_response_type != cormoran_fast_keymap_Response_error_tag ||
+        resp.response_type.error.code != cormoran_fast_keymap_ErrorCode_ERR_INVALID_IDENTIFIER) {
+        LOG_ERR("set_keymap_identifier should reject non-Base64url characters");
+        return -EINVAL;
+    }
+
+    resp = (cormoran_fast_keymap_Response)cormoran_fast_keymap_Response_init_zero;
+#if IS_ENABLED(CONFIG_SETTINGS_NONE)
+    /* Native simulator has the no-op settings backend. A write must fail
+     * instead of claiming persistence; hardware builds exercise NVS. */
+    if (!call_set_keymap_identifier(valid, &resp) ||
+        resp.which_response_type != cormoran_fast_keymap_Response_error_tag ||
+        resp.response_type.error.code != cormoran_fast_keymap_ErrorCode_ERR_GENERIC) {
+        LOG_ERR("set_keymap_identifier should reject unavailable storage (type=%d code=%d)",
+                resp.which_response_type, resp.response_type.error.code);
+        return -EINVAL;
+    }
+    LOG_INF("PASS: fast_keymap_identifier (storage unavailable)");
+    return 0;
+#else
+    if (!call_set_keymap_identifier(valid, &resp) ||
+        resp.which_response_type != cormoran_fast_keymap_Response_set_keymap_identifier_tag) {
+        LOG_ERR("set_keymap_identifier failed");
+        return -EINVAL;
+    }
+    capture = (struct str_capture){0};
+    if (!call_get_keymap_identifier(&capture) || strcmp(capture.buf, valid) != 0) {
+        LOG_ERR("get_keymap_identifier did not return the saved value");
+        return -EINVAL;
+    }
+    if (settings_load_subtree("fast_keymap") < 0 || !call_get_keymap_identifier(&capture) ||
+        strcmp(capture.buf, valid) != 0) {
+        LOG_ERR("keymap identifier did not survive a settings reload");
+        return -EINVAL;
+    }
+
+    resp = (cormoran_fast_keymap_Response)cormoran_fast_keymap_Response_init_zero;
+    if (!call_set_keymap_identifier("", &resp) ||
+        resp.which_response_type != cormoran_fast_keymap_Response_set_keymap_identifier_tag) {
+        LOG_ERR("clear keymap identifier failed");
+        return -EINVAL;
+    }
+    capture = (struct str_capture){0};
+    if (!call_get_keymap_identifier(&capture) || capture.buf[0] != '\0') {
+        LOG_ERR("get_keymap_identifier should be unset after clear");
+        return -EINVAL;
+    }
+
+    LOG_INF("PASS: fast_keymap_identifier");
+    return 0;
+#endif /* CONFIG_SETTINGS_NONE */
+#endif
+}
+
 static int fast_keymap_rpc_test_init(void) {
     int ret;
 
@@ -2154,6 +2313,11 @@ static int fast_keymap_rpc_test_init(void) {
     }
 
     ret = test_invalid_requests();
+    if (ret < 0) {
+        return ret;
+    }
+
+    ret = test_keymap_identifier();
     if (ret < 0) {
         return ret;
     }

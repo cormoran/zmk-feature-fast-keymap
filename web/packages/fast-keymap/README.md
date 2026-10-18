@@ -16,6 +16,10 @@ subsystem. This package provides:
   layer assembly, bundle-first behavior resolution).
 - `exportKeymapText()` / `formatBindingToken()` / `indexBehaviorsById()`:
   render a loaded model back out as `.keymap`-style devicetree text.
+- `hashKeymapIdentifier()` / `getKeymapIdentifier()` /
+  `setKeymapIdentifier()`: derive a four-character keymap type ID from an
+  exact UTF-8 source string and read or persist it over RPC. The setter
+  requires ZMK Studio unlock.
 
 This package intentionally does **not** own the RPC transport (WebSerial,
 WebBluetooth, or anything else) -- each consuming app supplies its own
